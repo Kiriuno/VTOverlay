@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VTOverlay</title>
+<link rel="stylesheet" href="shared/style.css">
+<style>
+  body { padding: 16px 18px; overflow-y: auto; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  h1 span { color: var(--accent); font-family: Consolas, ui-monospace, monospace; letter-spacing: .12em; }
+  .status { font-size: 13px; margin-bottom: 14px; }
+  h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 14px 0 6px; font-weight: 600; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .row button { flex: 1 1 auto; padding: 7px 8px; font-size: 13px; }
+  button.cur { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  kbd { font-family: inherit; font-size: 11px; opacity: .7; margin-left: 4px; }
+  select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; width: 100%; margin-top: 6px; }
+  label.toggle { display: flex; gap: 10px; align-items: center; margin-top: 8px; cursor: pointer; font-size: 13px; }
+  label.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .note { font-size: 12px; line-height: 1.45; margin-top: 14px; }
+  #quit { color: var(--bad); }
+</style>
+</head>
+<body>
+  <h1>Watching room <span id="code">······</span></h1>
+  <div class="status muted"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></div>
+
+  <h3>Show the avatar as</h3>
+  <div class="row" id="modes">
+    <button data-mode="floating">Floating</button>
+    <button data-mode="window">Window</button>
+    <button data-mode="screen">Full screen</button>
+  </div>
+  <select id="display" hidden></select>
+
+  <div id="screenActions" hidden>
+    <h3>Full screen</h3>
+    <div class="row">
+      <button id="zone">Select zone<kbd>Ctrl+Alt+V</kbd></button>
+      <button id="zoneReset">Use whole screen</button>
+    </div>
+    <label class="toggle"><input type="checkbox" id="share"> Share this screen with the broadcaster</label>
+  </div>
+
+  <div id="floatActions" hidden>
+    <h3>Floating widget</h3>
+    <div class="row">
+      <button id="lock">Move / resize<kbd>Ctrl+Alt+V</kbd></button>
+      <button id="resetPos">Reset position</button>
+    </div>
+  </div>
+
+  <h3>Connection</h3>
+  <div class="row">
+    <button id="reconnect">Reconnect</button>
+    <button id="disconnect">Disconnect</button>
+    <button id="quit">Quit</button>
+  </div>
+
+  <div class="note muted">Closing this window (✕) keeps VTOverlay running in the tray (the ^ next to the clock):
+    click its icon to bring this window back. Only <b>Quit</b> closes the app.</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const act = (a, arg) => window.vt.rxAction(a, arg);
+  document.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = () => act('mode', b.dataset.mode)));
+  $('display').onchange = () => act('display', Number($('display').value));
+  $('zone').onclick = () => act('zone-toggle');
+  $('zoneReset').onclick = () => act('zone-reset');
+  $('share').onchange = () => act('share', $('share').checked);
+  $('lock').onclick = () => act('lock-toggle');
+  $('resetPos').onclick = () => act('reset-pos');
+  $('reconnect').onclick = () => act('reconnect');
+  $('disconnect').onclick = () => act('disconnect');
+  $('quit').onclick = () => act('quit');
+
+  window.vt.onRxState((st) => {
+    $('code').textContent = st.code;
+    $('dot').className = 'dot ' + (st.status?.state || '');
+    $('statusText').textContent = st.status?.text || '';
+    document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('cur', b.dataset.mode === st.mode));
+    $('screenActions').hidden = st.mode !== 'screen';
+    $('floatActions').hidden = st.mode !== 'floating';
+    $('display').hidden = st.mode !== 'screen' || st.displays.length < 2;
+    $('display').innerHTML = st.displays.map((d) => `<option value="${d.id}">${d.label}</option>`).join('');
+    $('display').value = String(st.displayId);
+    $('share').checked = st.sharing;
+    $('zone').firstChild.textContent = st.editingZone ? 'Finish zone' : 'Select zone';
+    $('lock').firstChild.textContent = st.locked ? 'Move / resize' : 'Lock in place';
+  });
+</script>
+</body>
+</html>

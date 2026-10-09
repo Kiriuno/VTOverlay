@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+*.zip
+*.log
+test-*
+.DS_Store
+Thumbs.db

@@ -1,0 +1,59 @@
+# Builds both Windows apps and publishes them as a GitHub release when you push a version tag.
+#
+#   1. bump "version" in package.json (e.g. 0.6.1) and commit
+#   2. git tag v0.6.1 && git push && git push --tags
+#
+# The apps check this repo's latest release on launch and offer the update.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG — bump the version first."
+            exit 1
+          fi
+
+      - name: Build both apps and zip them
+        run: npm run release-zips
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/VTOverlay-win32-x64.zip \
+            dist/VTOverlay-Viewer-win32-x64.zip \
+            --title "VTOverlay $GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Keep the zips as a build artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: VTOverlay-windows
+          path: dist/*.zip

@@ -1,0 +1,215 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VTOverlay — Broadcasting</title>
+<link rel="stylesheet" href="shared/style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/",
+  "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js",
+  "@mediapipe/tasks-vision": "/node_modules/@mediapipe/tasks-vision/vision_bundle.mjs"
+} }
+</script>
+<script src="/node_modules/peerjs/dist/peerjs.min.js"></script>
+<style>
+  body { display: grid; grid-template-columns: 1fr 340px; height: 100vh; overflow: hidden; }
+  #stageWrap { position: relative; background:
+      radial-gradient(circle at 50% 35%, #2a2340 0%, var(--bg) 70%); }
+  #stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; pointer-events: none; }
+  #empty div { max-width: 320px; }
+  #cam { position: absolute; left: 16px; bottom: 16px; width: 200px; border-radius: 10px; border: 1px solid var(--line);
+         transform: scaleX(-1); background: #000; aspect-ratio: 4/3; object-fit: cover; }
+  body.camHidden #cam { opacity: 0; pointer-events: none; }
+  body.camHidden #trackState { bottom: 16px; }
+  #trackState { position: absolute; left: 16px; bottom: 176px; font-size: 12px; background: #0008; padding: 4px 8px; border-radius: 6px; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+  .sec h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  #code { font-size: 34px; font-weight: 700; letter-spacing: .18em; font-family: Consolas, ui-monospace, monospace; color: var(--accent); }
+  .codeRow { display: flex; align-items: center; justify-content: space-between; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  label.toggle { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; cursor: pointer; }
+  label.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .slider { display: grid; grid-template-columns: 1fr 120px; align-items: center; padding: 4px 0; }
+  .slider input { accent-color: var(--accent); }
+  select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; width: 100%; }
+  .xbtn { flex: 1 1 28%; padding: 7px 4px; font-size: 13px; }
+  .xbtn kbd { opacity: .6; font-size: 11px; margin-right: 4px; font-family: inherit; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); }
+  .hint { font-size: 12px; line-height: 1.45; }
+  #tabs { position: absolute; top: 14px; left: 14px; display: flex; gap: 4px; background: #0006; padding: 4px; border-radius: 10px; z-index: 3; }
+  #tabs button { border: 0; background: transparent; padding: 6px 12px; font-size: 13px; }
+  #tabs button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  body.placing #cam, body.placing #trackState, body.placing #stage, body.placing #empty { visibility: hidden; }
+  #placeView { position: absolute; inset: 0; padding: 64px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+  #placeBar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #placeBar select { width: auto; min-width: 180px; }
+  #screenArea { flex: 1; position: relative; min-height: 0; }
+  #screenBox { position: absolute; border-radius: 8px; overflow: hidden; background:
+      linear-gradient(#ffffff08 1px, transparent 1px) 0 0 / 40px 40px, linear-gradient(90deg, #ffffff08 1px, transparent 1px) 0 0 / 40px 40px, #0d0b12;
+      border: 1px solid var(--line); }
+  #screenVid { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: .9; }
+  #noVideo { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 20px; font-size: 13px; pointer-events: none; }
+  #zoneBox { position: absolute; outline: 1px dashed #b48cffaa; }
+  #avBox { position: absolute; border: 2px solid var(--accent); background: #b48cff2a; border-radius: 6px; cursor: grab; touch-action: none;
+           display: flex; align-items: flex-end; justify-content: center; }
+  #avBox.dragging { cursor: grabbing; }
+  #avBox svg { width: 70%; height: 80%; opacity: .55; pointer-events: none; }
+  #avBox .name { position: absolute; top: -22px; left: 50%; transform: translateX(-50%); font-size: 11px; white-space: nowrap;
+                 background: var(--accent); color: var(--accent-ink); padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+  #avHandle { position: absolute; right: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: nesw-resize; }
+  #placeMsg { margin: auto; max-width: 420px; text-align: center; line-height: 1.5; }
+  #viewers .vrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  #viewers .vrow button { padding: 1px 8px; font-size: 12px; }
+  #viewTools { position: absolute; top: 14px; right: 14px; display: flex; gap: 6px; align-items: center; z-index: 3; }
+  #viewTools button { padding: 6px 10px; font-size: 13px; background: #0008; }
+  #viewHint { position: absolute; right: 14px; top: 54px; font-size: 12px; z-index: 3; text-align: right; background: #0006; padding: 4px 8px; border-radius: 6px; }
+  #guide { position: absolute; top: 0; bottom: 0; left: 50%; transform: translateX(-50%); aspect-ratio: 0.62; border-left: 1px dashed #b48cff55; border-right: 1px dashed #b48cff55; pointer-events: none; }
+  #guide span { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #b48cffaa; white-space: nowrap; }
+  body.placing #viewTools, body.placing #viewHint, body.placing #guide { display: none; }
+  #stage { cursor: grab; }
+  #stop { color: var(--bad); }
+  #pausedBanner { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #14121ae6; border: 1px solid var(--warn);
+                  border-radius: 12px; padding: 14px 20px; text-align: center; z-index: 4; }
+  #pausedBanner b { color: var(--warn); font-size: 16px; }
+  body.placing #pausedBanner { display: none; }
+  #pauseBtn.on { background: var(--warn); color: #1a1408; border-color: var(--warn); font-weight: 600; }
+  .xbtn small { display: block; font-size: 10px; opacity: .75; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .xbtn small.bad, .hk.bad { color: var(--bad); }
+  /* props */
+  #propList { display: flex; flex-direction: column; gap: 8px; }
+  .prop { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--panel-2); }
+  .prop.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .prop .top { display: flex; align-items: center; gap: 8px; }
+  .prop img { width: 34px; height: 34px; object-fit: contain; background: repeating-conic-gradient(#3a3450 0 25%, #2a2538 0 50%) 0 0/10px 10px; border-radius: 6px; flex: none; }
+  .prop .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; cursor: pointer; }
+  .prop button { padding: 3px 7px; font-size: 12px; }
+  .prop .hk { font-size: 11px; }
+  .prop .more { display: none; margin-top: 8px; }
+  .prop.sel .more { display: block; }
+  .prop select { padding: 5px 6px; font-size: 12px; }
+  .prop .slider { grid-template-columns: 70px 1fr; font-size: 12px; }
+  .prop label.toggle { font-size: 12px; padding: 3px 0; }
+  #propDrop { border: 1px dashed var(--line); border-radius: 10px; padding: 10px; text-align: center; font-size: 12px; }
+  /* hotkey capture */
+  #hkModal { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; z-index: 50; }
+  #hkModal > div { background: var(--panel); border: 1px solid var(--accent); border-radius: 14px; padding: 22px 26px; text-align: center; min-width: 340px; }
+  #hkModal h4 { margin: 0 0 6px; font-size: 15px; }
+  #hkCombo { font-size: 22px; font-weight: 700; color: var(--accent); min-height: 32px; margin: 12px 0; font-family: Consolas, ui-monospace, monospace; }
+  #hkMsg { min-height: 1.3em; font-size: 12px; }
+  #modelName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+</style>
+</head>
+<body>
+  <div id="stageWrap">
+    <canvas id="stage"></canvas>
+    <div id="empty"><div><p style="font-size:16px;margin:0 0 6px">No avatar loaded</p>
+      <p class="muted" style="margin:0">Load a <b>.vrm</b> file on the right. You can make one for free in VRoid Studio or download one from VRoid Hub.</p></div></div>
+    <div id="trackState"><span class="dot" id="trackDot"></span><span id="trackText">Starting camera…</span></div>
+    <video id="cam" playsinline muted></video>
+    <div id="guide"><span>what viewers see (widget / full screen)</span></div>
+    <div id="viewTools"><button id="frBtn">Bust</button><button id="resetView">Reset view</button></div>
+    <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: rotate<br>Viewers see exactly this framing</div>
+    <div id="pausedBanner" hidden><b>⏸ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling</div></div>
+    <div id="tabs"><button data-tab="avatar" class="on">My avatar</button><button data-tab="place">Place on viewer's screen</button></div>
+    <div id="placeView" hidden>
+      <div id="placeBar">
+        <select id="viewerSel"></select>
+        <button id="resetPos">Reset position</button>
+        <span class="muted hint">Drag the avatar to move it · scroll or drag the dot to resize</span>
+      </div>
+      <div id="screenArea">
+        <div id="screenBox">
+          <video id="screenVid" muted playsinline autoplay></video>
+          <div id="noVideo" class="muted"></div>
+          <div id="zoneBox">
+            <div id="avBox"><span class="name" id="avName">Avatar</span><i id="avHandle"></i>
+              <svg viewBox="0 0 60 100"><circle cx="30" cy="18" r="13" fill="#b48cff"/><path d="M8 100 V58 q0-20 22-20 q22 0 22 20 V100z" fill="#b48cff"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="placeMsg" class="muted" hidden></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="sec">
+      <h3>Room code</h3>
+      <div class="codeRow"><span id="code">······</span><button id="copy">Copy</button></div>
+      <div class="muted" style="margin-top:6px"><span class="dot" id="netDot"></span><span id="netText">Connecting to signalling server…</span></div>
+      <div class="row" style="margin-top:10px"><button id="stop">Stop broadcasting</button><button id="newCode">New code</button></div>
+    </div>
+
+    <div class="sec">
+      <h3>Avatar</h3>
+      <div class="row" style="justify-content:space-between">
+        <span id="modelName" class="muted">None</span>
+        <span id="syncBadge" class="badge" hidden>Perfect sync</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="load">Load .vrm…</button>
+        <input type="file" id="file" accept=".vrm" hidden>
+      </div>
+      <div class="hint muted" style="margin-top:6px">Your webcam image never leaves this computer — viewers only receive head/face movement numbers. The model is sent to viewers automatically — they don't need the file.</div>
+    </div>
+
+    <div class="sec">
+      <h3>Tracking</h3>
+      <div class="row" style="margin-bottom:8px"><button id="pauseBtn" style="flex:1">⏸ Pause tracking</button><button id="pauseHk" class="hk" title="Set a hotkey for pause / resume">⌨</button></div>
+      <select id="camSel"></select>
+      <div class="row" style="margin-top:8px"><button id="calib">Calibrate (look straight, relaxed face)</button></div>
+      <label class="toggle">Hide webcam preview <input type="checkbox" id="hideCam"></label>
+      <label class="toggle">Auto expressions from your face <input type="checkbox" id="autoExpr"></label>
+      <label class="toggle">Track arms &amp; hands <span class="badge" style="margin-left:6px">beta</span><input type="checkbox" id="arms" style="margin-left:auto"></label>
+      <div class="hint muted" id="armsHint" hidden>Keep your shoulders and hands in the camera view. Uses more CPU/GPU.</div>
+      <label class="toggle">Mirror (move like a reflection) <input type="checkbox" id="mirror" checked></label>
+      <label class="toggle">Swap left/right eyes &amp; mouth <input type="checkbox" id="swapLR" checked></label>
+      <label class="toggle">Link both eyes (no winks) <input type="checkbox" id="linkEyes"></label>
+      <div class="slider"><span>Smoothing</span><input type="range" id="smoothing" min="0" max="1" step="0.05" value="0.5"></div>
+      <div class="slider" title="How much the body follows your head going up and down (0 = not at all)"><span>Up / down movement</span><input type="range" id="bodyY" min="0" max="3" step="0.05" value="1"></div>
+      <div class="slider" title="How much the body follows your head going left and right"><span>Left / right movement</span><input type="range" id="bodyX" min="0" max="3" step="0.05" value="1"></div>
+      <div class="slider" title="How much the body follows your head going toward / away from the camera"><span>Forward / back movement</span><input type="range" id="bodyZ" min="0" max="2" step="0.05" value="0.5"></div>
+      <div class="slider"><span>Mouth sensitivity</span><input type="range" id="mouthGain" min="0.5" max="3" step="0.05" value="1.6"></div>
+      <div class="slider"><span>Blink sensitivity</span><input type="range" id="blinkGain" min="0.5" max="3" step="0.05" value="1.5"></div>
+      <div class="hint muted">Wink test: close your <b>right</b> eye. With Mirror on, the eye on the <b>right side</b> of the preview should close (off: the left side). If the other one closes, flip “Swap left/right”.</div>
+    </div>
+
+    <div class="sec">
+      <h3>Expressions</h3>
+      <div class="hint muted" style="margin:-4px 0 8px">Keys 1–9 · 0 clears · <b>Ctrl+Shift+1–9</b> from any app · <b>right-click</b> an expression to give it your own hotkey</div>
+      <div class="row" id="xrow"></div>
+      <div id="exprTune" hidden>
+        <div class="hint" style="margin:10px 0 2px">While <b id="tuneName"></b> is on:</div>
+        <div class="slider"><span>Mouth movement</span><input type="range" id="tuneMouth" min="0" max="1.5" step="0.05"></div>
+        <div class="slider"><span>Blinking</span><input type="range" id="tuneBlink" min="0" max="1.5" step="0.05"></div>
+        <div class="row"><button id="tuneReset" style="padding:4px 10px;font-size:12px">Reset</button><button id="tuneHk" class="hk" style="padding:4px 10px;font-size:12px">⌨ Hotkey</button></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <h3>Props</h3>
+      <div class="row" style="margin-bottom:8px"><button id="addProp">Add image…</button><input type="file" id="propFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
+      <div id="propList"></div>
+      <div id="propDrop" class="muted">PNG, JPG, GIF or WebP (animated works). Drop images here or anywhere on the window.<br>
+        In the preview: <b>drag</b> a prop to move it · <b>scroll</b> on it to resize · <b>Shift+scroll</b> to rotate.</div>
+    </div>
+
+    <div class="sec">
+      <h3>Viewers</h3>
+      <div id="viewers" class="muted">Nobody yet — share the code.</div>
+    </div>
+  </aside>
+
+<div id="hkModal" hidden><div>
+  <h4 id="hkTitle">Hotkey</h4>
+  <div class="muted" style="font-size:12px">Press the key combination — e.g. Alt+H, Ctrl+Alt+1, F9, Ctrl+Shift+Numpad 3</div>
+  <div id="hkCombo">…</div>
+  <div id="hkMsg" class="muted"></div>
+  <div class="row" style="justify-content:center;margin-top:10px"><button id="hkClear">Remove hotkey</button><button id="hkCancel">Cancel (Esc)</button></div>
+</div></div>
+<script type="module" src="sender.js"></script>
+</body>
+</html>

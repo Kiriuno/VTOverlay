@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VTOverlay</title>
+<link rel="stylesheet" href="shared/style.css">
+<style>
+  body { display: grid; place-items: center; overflow-y: auto; }
+  main { width: 470px; padding: 20px 0; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -.01em; }
+  h1 span { color: var(--accent); }
+  .sub { margin: 0 0 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .card p { margin: 0 0 14px; }
+  .row { display: flex; gap: 10px; }
+  #code { text-transform: uppercase; letter-spacing: .25em; font-weight: 600; }
+  #name { width: 100%; margin-bottom: 12px; }
+  #err { color: var(--bad); min-height: 1.2em; margin-top: 8px; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 14px 0 6px; font-weight: 600; }
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .mode { text-align: left; padding: 10px; border-radius: 10px; }
+  .mode b { display: block; font-size: 13px; margin-bottom: 2px; }
+  .mode span { font-size: 11.5px; color: var(--muted); line-height: 1.35; display: block; }
+  .mode.on { background: #b48cff22; border-color: var(--accent); }
+  .mode.on b { color: var(--accent); }
+  select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; width: 100%; }
+  label.toggle { display: flex; gap: 10px; align-items: flex-start; margin-top: 10px; cursor: pointer; font-size: 13px; line-height: 1.4; }
+  label.toggle input { accent-color: var(--accent); width: 16px; height: 16px; margin-top: 2px; flex: none; }
+  .privacy { font-size: 12px; margin-top: 12px; line-height: 1.45; }
+  #update { border-color: var(--accent); background: #b48cff14; }
+  #update h2 { color: var(--accent); }
+  #update .row { margin-top: 10px; }
+  #upBar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+  #upBar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #upMsg { font-size: 12px; margin-top: 6px; min-height: 1.2em; }
+  footer { text-align: center; font-size: 12px; margin-top: 4px; }
+  footer a { color: var(--muted); cursor: pointer; text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>VT<span>Overlay</span><span id="viewerTag" hidden style="color:var(--muted);font-weight:400"> Viewer</span></h1>
+  <p class="sub muted">Put your avatar on a friend's desktop, live.</p>
+
+  <section class="card" id="update" hidden>
+    <h2 id="upTitle">Update available</h2>
+    <div class="muted" id="upText"></div>
+    <div id="upBar" hidden><i></i></div>
+    <div id="upMsg" class="muted"></div>
+    <div class="row" id="upButtons"><button class="primary" id="upGo">Update now</button><button id="upNotes">What's new</button><button id="upLater">Later</button></div>
+  </section>
+
+  <section class="card" id="sendCard">
+    <h2>Broadcast my avatar</h2>
+    <p class="muted">Use your webcam to drive your VRM model and get a room code to share.</p>
+    <button class="primary" id="send">Start broadcasting</button>
+  </section>
+
+  <section class="card">
+    <h2>Show a friend's avatar</h2>
+    <p class="muted">Enter the code your friend gave you.</p>
+    <input id="name" type="text" maxlength="24" placeholder="Your name (optional, shown to the broadcaster)" autocomplete="off" spellcheck="false">
+    <input id="code" type="text" maxlength="6" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" style="width:100%">
+
+    <div class="label">Show the avatar</div>
+    <div class="modes">
+      <button class="mode" data-mode="floating"><b>Floating</b><span>Small see-through widget you drag anywhere</span></button>
+      <button class="mode" data-mode="window"><b>Window</b><span>A normal window you can resize or minimise</span></button>
+      <button class="mode" data-mode="screen"><b>Full screen</b><span>Over a whole monitor; the broadcaster moves it</span></button>
+    </div>
+
+    <div id="screenOpts" hidden>
+      <div class="label">Monitor</div>
+      <select id="display"></select>
+      <label class="toggle"><input type="checkbox" id="share">
+        <span>Let the broadcaster see this monitor so they can place the avatar
+        <span class="muted" style="display:block;font-size:12px">Low frame rate, only that monitor, can be stopped any time from the tray icon.</span></span></label>
+      <div class="muted privacy">You can limit the avatar to part of the screen with <b>Ctrl+Alt+V</b> once it's running.</div>
+    </div>
+    <button class="primary" id="recv" style="width:100%;margin-top:16px;padding:11px">Join</button>
+    <div id="err"></div>
+  </section>
+  <footer class="muted"><span id="version"></span> · <a id="checkUpdates">Check for updates</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  };
+  let mode = store.get('rx-mode', 'floating');
+  const setMode = (m) => {
+    mode = m;
+    document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
+    $('screenOpts').hidden = m !== 'screen';
+  };
+  document.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
+  setMode(mode);
+  $('name').value = store.get('rx-name', '');
+  $('code').value = store.get('rx-code', '');
+  $('share').checked = store.get('rx-share', false);
+
+  // ---- updates ----
+  let upInfo = null;
+  async function checkUpdates(manual) {
+    $('checkUpdates').textContent = 'Checking…';
+    const r = await window.vt.checkUpdate();
+    upInfo = r;
+    $('checkUpdates').textContent = 'Check for updates';
+    if (r.state === 'available') {
+      $('update').hidden = false;
+      $('upTitle').textContent = 'Update available';
+      $('upText').textContent = `Version ${r.latest} is out (you have ${r.current}). The download is about ${Math.round((r.size || 0) / 1048576)} MB and VTOverlay restarts by itself.`;
+    } else if (manual) {
+      const msg = { latest: `You're up to date (v${r.current}).`, none: 'No release has been published yet.', dev: 'Running from source — update with git pull.', error: 'Update check failed: ' + r.error }[r.state];
+      $('checkUpdates').textContent = msg;
+      setTimeout(() => ($('checkUpdates').textContent = 'Check for updates'), 5000);
+    }
+  }
+  $('checkUpdates').onclick = () => checkUpdates(true);
+  $('upLater').onclick = () => { $('update').hidden = true; };
+  $('upNotes').onclick = () => upInfo?.page && window.vt.openExternal(upInfo.page);
+  $('upGo').onclick = async () => {
+    $('upButtons').hidden = true; $('upBar').hidden = false; $('upMsg').textContent = 'Downloading…';
+    const r = await window.vt.installUpdate();
+    if (!r.ok) { $('upMsg').textContent = 'Update failed: ' + r.error; $('upButtons').hidden = false; $('upBar').hidden = true; }
+  };
+  window.vt.onUpdateProgress((p) => {
+    $('upBar').firstElementChild.style.width = Math.round(p.fraction * 100) + '%';
+    $('upMsg').textContent = p.phase === 'download' ? `Downloading… ${Math.round(p.fraction * 100)}%` : 'Installing — VTOverlay will restart in a moment…';
+  });
+
+  window.vt.getConfig().then((cfg) => {
+    $('version').textContent = 'v' + cfg.version;
+    if (cfg.justUpdated) { $('update').hidden = false; $('upTitle').textContent = `Updated to v${cfg.version} ✓`; $('upText').textContent = 'Everything is ready.'; $('upButtons').hidden = true; setTimeout(() => { $('update').hidden = true; }, 6000); }
+    else checkUpdates(false);
+    if (cfg.receiverOnly) { $('sendCard').hidden = true; $('viewerTag').hidden = false; document.querySelector('.sub').textContent = "See a friend's avatar on your desktop, live."; document.title = 'VTOverlay Viewer'; }
+    const saved = store.get('rx-display', null);
+    $('display').innerHTML = cfg.displays.map((d) => `<option value="${d.id}">${d.label}</option>`).join('');
+    if (saved && cfg.displays.some((d) => d.id === saved)) $('display').value = saved;
+  });
+
+  $('send').onclick = () => window.vt.startSender();
+  const join = () => {
+    const code = $('code').value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(code)) { $('err').textContent = 'Codes are 6 letters/numbers.'; return; }
+    const opts = { code, mode, name: $('name').value.trim(), displayId: Number($('display').value), share: $('share').checked };
+    store.set('rx-mode', mode); store.set('rx-name', opts.name); store.set('rx-code', code);
+    store.set('rx-share', opts.share); store.set('rx-display', opts.displayId);
+    window.vt.startReceiver(opts);
+  };
+  $('recv').onclick = join;
+  $('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+</script>
+</body>
+</html>
