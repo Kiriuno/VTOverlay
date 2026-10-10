@@ -29,7 +29,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 
 1. **Start broadcasting** and load your `.vrm` (button or drag & drop). Free models can be made in [VRoid Studio](https://vroid.com/en/studio).
 2. Look at the screen with a relaxed face and press **Calibrate**.
-3. Send your friend the 6-character **room code** (**Copy** button). It stays the same between launches.
+3. Send your friend the 6-character **room code** (**Copy** button). It stays the same between launches. **Max viewers** optionally limits how many people can watch; anyone extra is told the room is full and gets in as soon as a spot frees up.
 4. Frame the shot in your preview. Viewers see exactly this framing:
    - scroll to zoom
    - middle-drag to move the avatar
@@ -44,7 +44,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 | **Expressions** | Every expression your model has gets a button; click to toggle. **Right-click** an expression (or *neutral*) to give it a hotkey (Alt+H, Ctrl+Alt+1, F9…); hotkeys work from any app. There are no default hotkeys, only the ones you set. While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / surprised / angry from your face. |
 | **Props** | Add PNG / JPG / GIF / WebP images (animated ones play). Each prop either stays in the scene or is attached to a body part and moves with it. Drag it in the preview, scroll on it to resize, Shift+scroll to rotate. It can also face the camera, be mirrored, get a hotkey to show/hide it, and more. |
 | **Arms & hands** *(beta)* | Follows your arms and fingers when they're in the camera view. |
-| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. They can share that screen with you so you see where you're putting it. |
+| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. Their taskbar is shown as a strip, and the avatar stays out of it. They can share that screen with you so you see where you're putting it. |
 
 ## Watching (your friend)
 

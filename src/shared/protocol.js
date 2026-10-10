@@ -63,7 +63,7 @@ Messages
                            { t:'need-model' }   cache miss after 'model-use'
     broadcaster -> viewer  { t:'view', fr, zoom, px, py, yaw, el }
                            { t:'pos', x, y, s }   (only used in 'screen' mode)
-    both ways              { t:'hb' } heartbeat · { t:'bye', reason:'ended'|'kicked'|'left' } clean disconnect
+    both ways              { t:'hb' } heartbeat · { t:'bye', reason:'ended'|'kicked'|'left'|'full', max? } clean disconnect / room full
 
   props (model channel):
     broadcaster -> viewer  { t:'props', list:[{ id, img, attach, pos, rot, size, face, flip, visible }] }  full list on every change
@@ -74,6 +74,13 @@ Messages
   screen preview (optional, viewer opts in): the viewer places a PeerJS media call to the
   broadcaster carrying a low-frame-rate capture of the monitor the avatar is on.
 */
+
+/** The zone the avatar may use in full screen mode, minus the taskbar (`work` = usable part of the monitor). */
+export function effectiveZone(zone, work = { x: 0, y: 0, w: 1, h: 1 }) {
+  const x = Math.max(zone.x, work.x), y = Math.max(zone.y, work.y);
+  const r = Math.min(zone.x + zone.w, work.x + work.w), b = Math.min(zone.y + zone.h, work.y + work.h);
+  return r - x > 0.02 && b - y > 0.02 ? { x, y, w: r - x, h: b - y } : { ...work };
+}
 
 // PeerJS's `reliable: false` only makes a data channel *unordered* — it still retransmits lost
 // packets forever, so on a lossy connection old motion frames pile up (growing lag) and block the

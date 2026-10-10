@@ -1,7 +1,7 @@
 // Receiver: shows a friend's avatar as a floating widget, in a window, or over a whole monitor.
 // How the avatar is framed (bust/full, zoom, position, rotation) is controlled by the broadcaster.
 import { AvatarStage } from './shared/avatar.js';
-import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, peerOptions } from './shared/protocol.js';
+import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -88,7 +88,8 @@ let zone = store.get('vt-zone', FULL_ZONE);
 let pos = { ...DEFAULT_POS, ...store.get('vt-pos', {}) };
 const shown = { ...pos }; // smoothed
 
-function zonePx(z = zone) {
+let work = { x: 0, y: 0, w: 1, h: 1 }; // monitor minus the taskbar (filled in below)
+function zonePx(z = effectiveZone(zone, work)) {
   const W = innerWidth, H = innerHeight;
   return { x: z.x * W, y: z.y * H, w: z.w * W, h: z.h * H };
 }
@@ -132,6 +133,13 @@ function applyPos(p) {
 }
 
 if (MODE === 'screen') {
+  const setWork = (w) => {
+    if (!w || !(w.w > 0) || !(w.h > 0)) return;
+    work = w;
+    applyPos({}); layoutBox(); sendViewerState();
+  };
+  window.vt.getWorkArea().then(setWork);
+  window.vt.onWorkArea(setWork);
   Object.assign(shown, pos);
   layoutBox();
   animatePlacement();
@@ -236,6 +244,7 @@ let peer = null, motion = null, model = null;
 let incoming = null;
 let retryTimer = null, hbTimer = null, lastHeard = 0;
 let stopped = false; // kicked or leaving: don't auto-reconnect
+let roomFullUntil = 0;
 const target = PEER_PREFIX + code;
 
 function connect() {
@@ -276,7 +285,7 @@ function openChannels() {
     }
     stage.setMotion(d);
   });
-  const lost = () => { if (stopped) return; lostBroadcaster('Connection lost. Reconnecting…'); };
+  const lost = () => { if (stopped || performance.now() < roomFullUntil) return; lostBroadcaster('Connection lost. Reconnecting…'); };
   motion.on('close', lost);
   model.on('close', lost);
 }
@@ -323,7 +332,7 @@ function sendViewerState() {
   model.send({
     t: 'viewer', name: viewerName, mode: MODE,
     aspect: +(innerWidth / innerHeight).toFixed(4),
-    zone, pos, sharing, have: stage.modelId || cachedId,
+    zone, work, pos, sharing, have: stage.modelId || cachedId,
   });
 }
 
@@ -344,6 +353,11 @@ async function onModelData(d) {
       stage.clearVRM(); hasModel = false;
       stage.props.sync([]);
       if (d.reason === 'kicked') status('bad', 'The broadcaster disconnected you.', { retry: true });
+      else if (d.reason === 'full') {
+        roomFullUntil = performance.now() + 10000; // the channel closing right after must not override this
+        status('warn', `This room is full (${Number(d.max) || '?'} viewers max) — you'll join as soon as a spot frees up…`);
+        stopped = false; scheduleRetry(10000);
+      }
       else { status('warn', 'Broadcast ended — waiting for it to start again…'); stopped = false; scheduleRetry(4000); }
       return;
     case 'view': {

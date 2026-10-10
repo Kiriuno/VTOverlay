@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('vt', {
   goodbyeSent: () => ipcRenderer.send('goodbye-sent'),
   // receiver
   switchMode: (mode) => ipcRenderer.send('rx-switch-mode', mode),
+  getWorkArea: () => ipcRenderer.invoke('get-work-area'),
+  onWorkArea: (cb) => ipcRenderer.on('work-area', (_e, w) => cb(w)),
   disconnect: () => ipcRenderer.send('rx-disconnect'),
   onReconnect: (cb) => ipcRenderer.on('reconnect', () => cb()),
   // floating mode

@@ -53,6 +53,8 @@
   #screenVid { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: .9; }
   #noVideo { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 20px; font-size: 13px; pointer-events: none; }
   #zoneBox { position: absolute; outline: 1px dashed #b48cffaa; }
+  #screenBox .taskbar { position: absolute; background: repeating-linear-gradient(45deg, #ffffff14 0 6px, #ffffff08 6px 12px), #000a;
+    color: var(--muted); font-size: 10px; display: grid; place-items: center; pointer-events: none; text-transform: uppercase; letter-spacing: .1em; overflow: hidden; }
   #avBox { position: absolute; border: 2px solid var(--accent); background: #b48cff2a; border-radius: 6px; cursor: grab; touch-action: none;
            display: flex; align-items: flex-end; justify-content: center; }
   #avBox.dragging { cursor: grabbing; }
@@ -141,6 +143,8 @@
       <div class="codeRow"><span id="code">······</span><button id="copy">Copy</button></div>
       <div class="muted" style="margin-top:6px"><span class="dot" id="netDot"></span><span id="netText">Connecting to signalling server…</span></div>
       <div class="row" style="margin-top:10px"><button id="stop">Stop broadcasting</button><button id="newCode">New code</button></div>
+      <div class="slider" style="margin-top:8px" title="Extra people who try to join get “room is full” and are let in when a spot frees up"><span>Max viewers</span>
+        <select id="maxViewers"><option value="0">No limit</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="8">8</option><option value="10">10</option><option value="15">15</option><option value="20">20</option></select></div>
     </div>
 
     <div class="sec">
@@ -198,7 +202,7 @@
     </div>
 
     <div class="sec">
-      <h3>Viewers</h3>
+      <h3>Viewers <span id="viewerCount" style="text-transform:none;letter-spacing:0"></span></h3>
       <div id="viewers" class="muted">Nobody yet — share the code.</div>
     </div>
   </aside>

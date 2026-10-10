@@ -400,6 +400,14 @@ async function disconnectReceiver() {
 
 // legacy channels used by the overlay page
 ipcMain.on('rx-switch-mode', (_e, mode) => switchMode(mode));
+
+// The part of the monitor not covered by the taskbar, as fractions of the monitor (full screen mode
+// keeps the avatar inside it, and the broadcaster sees the taskbar in the placement view).
+function workAreaOf(displayId) {
+  const d = displayById(displayId), b = d.bounds, w = d.workArea;
+  return { x: (w.x - b.x) / b.width, y: (w.y - b.y) / b.height, w: w.width / b.width, h: w.height / b.height };
+}
+ipcMain.handle('get-work-area', () => workAreaOf(rx.displayId));
 ipcMain.on('rx-disconnect', () => disconnectReceiver());
 
 function setClickThrough(on) {
@@ -545,6 +553,10 @@ app.whenReady().then(() => {
     callback(src ? { video: src } : null);
   });
   showLauncher();
+  // taskbar moved / resized / auto-hide toggled, resolution changed…
+  screen.on('display-metrics-changed', () => {
+    if (rx.mode === 'screen' && overlayWin && !overlayWin.isDestroyed()) overlayWin.webContents.send('work-area', workAreaOf(rx.displayId));
+  });
 });
 
 app.on('will-quit', () => globalShortcut.unregisterAll());

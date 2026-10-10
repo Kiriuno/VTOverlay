@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { FaceLandmarker, PoseLandmarker, HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { AvatarStage } from './shared/avatar.js';
 import {
-  ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT,
+  ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT, effectiveZone,
   HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, MOTION_MAX_BUFFERED, peerOptions,
 } from './shared/protocol.js';
 import { buildArmPayload } from './shared/arms.js';
@@ -22,7 +22,7 @@ const SEND_INTERVAL_MS = 33; // ~30 Hz
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, exprTune: {}, camId: '' };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, exprTune: {}, maxViewers: 0, camId: '' };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -339,6 +339,14 @@ function startPeer(code = savedCode() || randomCode()) {
   });
   peer.on('connection', (conn) => {
     const id = conn.peer;
+    // optional viewer limit: newcomers beyond it are told the room is full (they retry by themselves)
+    if (!viewers.has(id) && settings.maxViewers > 0 && viewers.size >= settings.maxViewers) {
+      conn.on('open', () => {
+        if (conn.label === 'model') { try { conn.send({ t: 'bye', reason: 'full', max: settings.maxViewers }); } catch {} }
+        setTimeout(() => conn.close(), 500);
+      });
+      return;
+    }
     let v = viewers.get(id);
     if (!v) { v = { n: ++viewerCount, pos: { ...DEFAULT_POS }, lastHeard: performance.now() }; viewers.set(id, v); }
     if (conn.label === 'model') {
@@ -429,8 +437,12 @@ window.vt.onAppClosing(async () => { await sayBye('ended'); window.vt.goodbyeSen
 const MODE_LABEL = { floating: 'floating widget', window: 'window', screen: 'full screen' };
 const viewerLabel = (v) => v.state?.name || `Viewer ${v.n}`;
 
+$('maxViewers').value = String(settings.maxViewers || 0);
+$('maxViewers').onchange = () => { settings.maxViewers = Number($('maxViewers').value) || 0; saveSettings(); updateViewers(); };
+
 function updateViewers() {
   const live = [...viewers.entries()].filter(([, v]) => v.motion?.open || v.model?.open);
+  $('viewerCount').textContent = settings.maxViewers ? `(${live.length} / ${settings.maxViewers})` : live.length ? `(${live.length})` : '';
   const box = $('viewers');
   box.classList.toggle('muted', !live.length);
   if (!live.length) box.textContent = 'Nobody yet — share the code.';
@@ -474,7 +486,7 @@ function onViewerMessage(id, v, d) {
   v.hello = true;
   v.state = {
     name: String(d.name || '').slice(0, 24), mode: d.mode, aspect: Number(d.aspect) || 16 / 9,
-    zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null,
+    zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, work: d.work || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null,
   };
   if (d.pos && !v.dragging) v.pos = { ...DEFAULT_POS, ...d.pos };
   if (first) {
@@ -578,7 +590,23 @@ function renderPlacement() {
   sb.width = w + 'px'; sb.height = h + 'px';
   sb.left = (area.clientWidth - w) / 2 + 'px'; sb.top = (area.clientHeight - h) / 2 + 'px';
 
-  const z = v.state.zone, zb = $('zoneBox').style;
+  // the taskbar (whatever the work area leaves out) is drawn as a strip; the avatar stays out of it
+  const wk = v.state.work;
+  const bars = [
+    wk.y > 0.005 && { left: 0, top: 0, width: 100, height: wk.y * 100 },
+    wk.y + wk.h < 0.995 && { left: 0, top: (wk.y + wk.h) * 100, width: 100, height: (1 - wk.y - wk.h) * 100 },
+    wk.x > 0.005 && { left: 0, top: 0, width: wk.x * 100, height: 100 },
+    wk.x + wk.w < 0.995 && { left: (wk.x + wk.w) * 100, top: 0, width: (1 - wk.x - wk.w) * 100, height: 100 },
+  ].filter(Boolean);
+  document.querySelectorAll('#screenBox .taskbar').forEach((el) => el.remove());
+  for (const b of bars) {
+    const el = document.createElement('div');
+    el.className = 'taskbar';
+    el.textContent = 'taskbar';
+    Object.assign(el.style, { left: b.left + '%', top: b.top + '%', width: b.width + '%', height: b.height + '%' });
+    $('screenBox').insertBefore(el, $('zoneBox'));
+  }
+  const z = effectiveZone(v.state.zone, wk), zb = $('zoneBox').style;
   zb.left = z.x * 100 + '%'; zb.top = z.y * 100 + '%'; zb.width = z.w * 100 + '%'; zb.height = z.h * 100 + '%';
 
   const vid = $('screenVid');
@@ -858,11 +886,12 @@ async function openCamera() {
       audio: false,
     });
   } catch (err) {
-    setTrack('bad', 'Camera unavailable: ' + err.message); return;
+    setTrack('bad', 'Camera unavailable: ' + err.message); return false;
   }
   video.srcObject = stream;
   await video.play();
   await listCameras();
+  return true;
 }
 
 async function loadModelBytes(url) {
@@ -1080,8 +1109,10 @@ async function setPaused(on) {
     setTrack('warn', 'Tracking paused');
   } else {
     filters.head.reset(); filters.face.reset(); prevQ = null; lastFace = null;
-    await openCamera();
-    setTrack('warn', 'Looking for your face…');
+    const ok = await openCamera();
+    // the tracking loop may already have found your face while the camera was starting —
+    // only show "looking" if it hasn't (it updates the status itself as soon as it does)
+    if (ok && lastFace === null) setTrack('warn', 'Looking for your face…');
   }
 }
 $('pauseBtn').onclick = () => setPaused(!paused);
