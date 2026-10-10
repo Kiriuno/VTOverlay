@@ -240,32 +240,90 @@ async function showModel(buf, id) {
 }
 
 // ---------------- networking ----------------
+// One Peer (signalling registration) is kept for the whole session; only the two data channels are
+// re-opened when the broadcaster drops. Every channel belongs to a "generation": closing old
+// channels bumps it, so their late close/error events can never trigger another reconnect
+// (that used to cause an endless connect → drop → connect loop every ~2 s).
 let peer = null, motion = null, model = null;
 let incoming = null;
-let retryTimer = null, hbTimer = null, lastHeard = 0;
+let retryTimer = null, hbTimer = null, sigTimer = null, lastHeard = 0;
 let stopped = false; // kicked or leaving: don't auto-reconnect
 let roomFullUntil = 0;
+let gen = 0;           // channel generation
+let failures = 0;      // consecutive failed attempts → backoff
+let sigFailures = 0;   // consecutive failed signalling reconnects
 const target = PEER_PREFIX + code;
+const backoff = () => Math.min(15000, 1500 * 2 ** Math.max(0, Math.min(failures - 1, 4))); // 1.5 s, 3 s, 6 s, 12 s, 15 s…
 
 function connect() {
   stopped = false;
   status('warn', `Connecting to room ${code}…`);
-  peer = new window.Peer(peerOptions());
-  peer.on('open', openChannels);
-  peer.on('error', (err) => {
-    if (stopped) return;
-    if (err.type === 'peer-unavailable') status('warn', hasModel ? `Waiting for the broadcast to come back…` : `Room ${code} isn't online yet. Retrying…`);
-    else status('bad', 'Connection problem: ' + (err.type || err.message) + '. Retrying…');
-    scheduleRetry(4000);
+  ensurePeer();
+}
+
+/** Make sure we're registered with the signalling server, then open the channels. */
+function ensurePeer() {
+  if (stopped) return;
+  if (peer && !peer.destroyed) {
+    if (peer.open) { if (!model) openChannels(); return; }
+    if (peer.disconnected) reconnectSignalling();
+    return; // still registering: 'open' will follow
+  }
+  const p = peer = new window.Peer(peerOptions());
+  p.on('open', () => {
+    if (p !== peer) return;
+    sigFailures = 0;
+    if (!model && !stopped) openChannels(); // a signalling reconnect must not touch working channels
   });
-  peer.on('disconnected', () => { if (!peer.destroyed && !stopped) peer.reconnect(); });
+  p.on('error', (err) => {
+    if (p !== peer || stopped) return;
+    if (err.type === 'peer-unavailable') {
+      if (model?.open) return; // about an old attempt
+      status('warn', hasModel ? 'Waiting for the broadcast to come back…' : `Room ${code} isn't online yet. Retrying…`);
+      channelsDown(null, 6000);
+      return;
+    }
+    console.warn('peer error', err.type, err.message);
+    if (model?.open) return; // signalling hiccup while connected: the avatar keeps working, 'disconnected' handles it
+    status('bad', 'Connection problem: ' + (err.type || err.message) + '. Retrying…');
+    failures++;
+    scheduleRetry(backoff());
+  });
+  p.on('disconnected', () => {
+    if (p !== peer || stopped || p.destroyed) return;
+    clearTimeout(sigTimer);
+    sigTimer = setTimeout(reconnectSignalling, Math.min(15000, 2000 * 2 ** Math.min(sigFailures, 3)));
+  });
+  p.on('close', () => { if (p === peer) peer = null; });
+}
+
+function reconnectSignalling() {
+  clearTimeout(sigTimer);
+  const p = peer;
+  if (stopped || !p || p.destroyed || !p.disconnected) return;
+  if (++sigFailures > 4 && !model?.open) { // our id seems stuck on the server: start over with a fresh one
+    sigFailures = 0;
+    peer = null;
+    try { p.destroy(); } catch {}
+    ensurePeer();
+    return;
+  }
+  try { p.reconnect(); } catch {}
 }
 
 function openChannels() {
-  model = peer.connect(target, { label: 'model', reliable: true, serialization: 'binary' });
-  motion = peer.connect(target, { label: 'motion', reliable: false, serialization: 'json' });
+  if (stopped || !peer?.open) return;
+  closeChannels();
+  const my = gen;
+  const live = () => my === gen && !stopped;
+  const m = model = peer.connect(target, { label: 'model', reliable: true, serialization: 'binary' });
+  const mo = motion = peer.connect(target, { label: 'motion', reliable: false, serialization: 'json' });
+  if (!m || !mo) { channelsDown(null); return; }
+  // if nothing opens in time (offer lost, broadcaster busy), try again
+  const openTimeout = setTimeout(() => { if (live() && !(m.open && mo.open)) channelsDown('Still connecting… retrying.'); }, 20000);
 
-  model.on('open', () => {
+  m.on('open', () => {
+    if (!live()) return;
     lastHeard = performance.now();
     sendViewerState();
     for (const hash of propWaiters.keys()) requestProp(hash); // anything still missing after a reconnect
@@ -273,11 +331,16 @@ function openChannels() {
     clearInterval(hbTimer);
     hbTimer = setInterval(heartbeat, HEARTBEAT_MS);
   });
-  model.on('data', onModelData);
-  motion.on('open', () => status('ok', hasModel ? 'Connected' : 'Connected — waiting for avatar…', { autoHide: hasModel }));
+  m.on('data', (d) => { if (live()) onModelData(d); });
+  mo.on('open', () => {
+    if (!live()) return;
+    clearTimeout(openTimeout);
+    failures = 0;
+    status('ok', hasModel ? 'Connected' : 'Connected — waiting for avatar…', { autoHide: hasModel });
+  });
   let lastSeq = 0; // per connection: the broadcaster restarts its counter, a new channel starts at 0
-  motion.on('data', (d) => {
-    if (!d || d.t !== 'm') return;
+  mo.on('data', (d) => {
+    if (!live() || !d || d.t !== 'm') return;
     lastHeard = performance.now();
     if (typeof d.n === 'number') {
       if (d.n <= lastSeq && lastSeq - d.n < 1000) return; // late / out-of-order frame: a newer one is already shown
@@ -285,36 +348,55 @@ function openChannels() {
     }
     stage.setMotion(d);
   });
-  const lost = () => { if (stopped || performance.now() < roomFullUntil) return; lostBroadcaster('Connection lost. Reconnecting…'); };
-  motion.on('close', lost);
-  model.on('close', lost);
+  const lost = () => {
+    if (!live()) return;
+    clearTimeout(openTimeout);
+    if (performance.now() < roomFullUntil) return;
+    channelsDown('Connection lost. Reconnecting…');
+  };
+  for (const c of [m, mo]) { c.on('close', lost); c.on('error', lost); }
+}
+
+/** Close the current channels; any events they still fire are ignored. */
+function closeChannels() {
+  gen++;
+  clearInterval(hbTimer);
+  const a = model, b = motion;
+  model = motion = null;
+  try { a?.close(); } catch {}
+  try { b?.close(); } catch {}
+}
+
+/** The channels are gone (or never came up): close what's left and try again later — once. */
+function channelsDown(text, maxDelay = Infinity) {
+  closeChannels();
+  if (stopped) return;
+  if (text) status('bad', text);
+  failures++;
+  scheduleRetry(Math.min(maxDelay, backoff()));
 }
 
 function heartbeat() {
   if (model?.open) { try { model.send({ t: 'hb' }); } catch {} }
-  if (performance.now() - lastHeard > HEARTBEAT_TIMEOUT_MS) lostBroadcaster('Broadcaster stopped responding. Reconnecting…');
-}
-
-function lostBroadcaster(text) {
-  clearInterval(hbTimer);
-  status('bad', text);
-  scheduleRetry(2000);
-}
-
-function teardown() {
-  clearInterval(hbTimer);
-  clearTimeout(retryTimer);
-  try { motion?.close(); model?.close(); screenCall?.close(); peer?.destroy(); } catch {}
-  motion = model = null;
-  screenCall = null;
+  if (performance.now() - lastHeard > HEARTBEAT_TIMEOUT_MS) channelsDown('Broadcaster stopped responding. Reconnecting…');
 }
 
 function scheduleRetry(ms = 3000) {
   clearTimeout(retryTimer);
-  retryTimer = setTimeout(() => { if (stopped) return; teardown(); connect(); }, ms);
+  retryTimer = setTimeout(() => { if (!stopped) ensurePeer(); }, ms);
 }
 
-function reconnectNow() { teardown(); connect(); }
+/** Close everything, including the signalling registration. */
+function teardown() {
+  closeChannels();
+  clearTimeout(retryTimer); clearTimeout(sigTimer);
+  try { screenCall?.close(); } catch {}
+  screenCall = null;
+  const p = peer; peer = null;
+  try { p?.destroy(); } catch {}
+}
+
+function reconnectNow() { teardown(); failures = 0; sigFailures = 0; connect(); }
 window.vt.onReconnect(reconnectNow);
 
 // say goodbye so the broadcaster's list updates immediately
@@ -348,17 +430,16 @@ async function onModelData(d) {
   switch (d.t) {
     case 'hb': return;
     case 'bye':
-      stopped = d.reason === 'kicked';
-      teardown();
+      closeChannels();
       stage.clearVRM(); hasModel = false;
       stage.props.sync([]);
-      if (d.reason === 'kicked') status('bad', 'The broadcaster disconnected you.', { retry: true });
+      if (d.reason === 'kicked') { stopped = true; teardown(); status('bad', 'The broadcaster disconnected you.', { retry: true }); }
       else if (d.reason === 'full') {
-        roomFullUntil = performance.now() + 10000; // the channel closing right after must not override this
+        roomFullUntil = performance.now() + 10000;
         status('warn', `This room is full (${Number(d.max) || '?'} viewers max) — you'll join as soon as a spot frees up…`);
-        stopped = false; scheduleRetry(10000);
+        scheduleRetry(10000);
       }
-      else { status('warn', 'Broadcast ended — waiting for it to start again…'); stopped = false; scheduleRetry(4000); }
+      else { status('warn', 'Broadcast ended — waiting for it to start again…'); failures = 0; scheduleRetry(4000); }
       return;
     case 'view': {
       const v = stage.setView(d);
@@ -411,7 +492,7 @@ async function onModelData(d) {
       const { parts, size, id } = incoming;
       incoming = null;
       $('bar').hidden = true;
-      if (parts.some((p) => !p)) { status('bad', 'Avatar transfer was incomplete. Reconnecting…'); scheduleRetry(1000); return; }
+      if (parts.some((p) => !p)) { channelsDown('Avatar transfer was incomplete. Reconnecting…'); return; }
       const buf = new Uint8Array(size); let off = 0;
       for (const p of parts) { buf.set(new Uint8Array(p), off); off += p.byteLength; }
       if (await showModel(buf.buffer.slice(0), id)) { cachedId = id; cachePut({ id, buf: buf.buffer }); }
@@ -425,9 +506,10 @@ let sharing = false, screenStream = null, screenCall = null;
 
 async function callWithScreen() {
   if (!screenStream || !peer?.open || screenCall) return;
-  screenCall = peer.call(target, screenStream, { metadata: { kind: 'screen' } });
-  screenCall.on('close', () => { screenCall = null; });
-  screenCall.on('error', () => { screenCall = null; });
+  const c = screenCall = peer.call(target, screenStream, { metadata: { kind: 'screen' } });
+  if (!c) { screenCall = null; return; }
+  const end = () => { if (screenCall === c) screenCall = null; };
+  c.on('close', end); c.on('error', end);
 }
 
 async function startSharing() {

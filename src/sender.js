@@ -330,14 +330,19 @@ const savedCode = () => { try { return localStorage.getItem('vt-code'); } catch 
 
 function setNet(state, text) { $('netDot').className = 'dot ' + state; $('netText').textContent = text; }
 
+let sigTimer = null, sigFailures = 0, idTakenTries = 0;
 function startPeer(code = savedCode() || randomCode()) {
-  peer = new window.Peer(PEER_PREFIX + code, peerOptions());
-  peer.on('open', () => {
+  clearTimeout(sigTimer);
+  const p = peer = new window.Peer(PEER_PREFIX + code, peerOptions());
+  p.on('open', () => {
+    if (p !== peer) return;
+    sigFailures = 0; idTakenTries = 0;
     try { localStorage.setItem('vt-code', code); } catch {}
     $('code').textContent = code;
-    setNet('ok', 'Online — waiting for viewers');
+    updateViewers();
+    if (!viewers.size) setNet('ok', 'Online — waiting for viewers');
   });
-  peer.on('connection', (conn) => {
+  p.on('connection', (conn) => {
     const id = conn.peer;
     // optional viewer limit: newcomers beyond it are told the room is full (they retry by themselves)
     if (!viewers.has(id) && settings.maxViewers > 0 && viewers.size >= settings.maxViewers) {
@@ -371,7 +376,7 @@ function startPeer(code = savedCode() || randomCode()) {
     conn.on('error', () => conn.close());
   });
   // optional screen preview from a viewer (they opt in on their side)
-  peer.on('call', (call) => {
+  p.on('call', (call) => {
     const v = viewers.get(call.peer);
     if (!v || call.metadata?.kind !== 'screen') { call.close(); return; }
     v.call?.close();
@@ -381,11 +386,42 @@ function startPeer(code = savedCode() || randomCode()) {
     const end = () => { if (v.call === call) { v.call = null; v.stream = null; renderPlacement(); } };
     call.on('close', end); call.on('error', end);
   });
-  peer.on('disconnected', () => { if (stopping) return; setNet('warn', 'Reconnecting…'); setTimeout(() => !peer.destroyed && peer.reconnect(), 1500); });
-  peer.on('error', (err) => {
-    if (err.type === 'unavailable-id') { peer.destroy(); try { localStorage.removeItem('vt-code'); } catch {} startPeer(randomCode()); return; }
-    if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') setNet('bad', 'Signalling server unreachable — retrying…');
-    else console.warn('peer error', err);
+  // Losing the signalling server does NOT end the broadcast: viewers stay connected peer-to-peer.
+  // We only need it back so new viewers (or reconnecting ones) can find us, under the SAME code.
+  const retrySignalling = () => {
+    clearTimeout(sigTimer);
+    const delay = Math.min(10000, 1500 * 2 ** Math.min(sigFailures++, 3)); // 1.5 s … 10 s
+    sigTimer = setTimeout(() => {
+      if (p !== peer || stopping) return;
+      if (p.destroyed) startPeer(code);            // never registered: start over, same code
+      else if (p.disconnected) { try { p.reconnect(); } catch {} }
+    }, delay);
+  };
+  p.on('disconnected', () => {
+    if (p !== peer || stopping || p.destroyed) return;
+    setNet('warn', viewers.size ? 'Streaming — reconnecting to the signalling server…' : 'Reconnecting…');
+    retrySignalling();
+  });
+  p.on('error', (err) => {
+    if (p !== peer || stopping) return;
+    if (err.type === 'peer-unavailable') return;
+    console.warn('peer error', err.type, err.message);
+    if (err.type === 'unavailable-id') {
+      // Usually our own previous registration that the server hasn't timed out yet: wait and retry
+      // the same code. Only a code that stays taken on a fresh start (≈1.5 min) is replaced.
+      if (p.destroyed && !viewers.size && ++idTakenTries > 8) {
+        idTakenTries = 0;
+        try { localStorage.removeItem('vt-code'); } catch {}
+        setNet('warn', `Code ${code} is used by someone else — getting a new one…`);
+        startPeer(randomCode());
+        return;
+      }
+      setNet('warn', `Code ${code} is still registered from before — retrying…`);
+      retrySignalling();
+      return;
+    }
+    if (!viewers.size) setNet('bad', 'Signalling server unreachable — retrying…');
+    if (p.destroyed || p.disconnected) retrySignalling();
   });
 }
 startPeer();
@@ -427,6 +463,7 @@ $('newCode').onclick = async () => {
   if (viewers.size && !confirm('Viewers on the current code will be disconnected. Continue?')) return;
   await sayBye('ended');
   stopping = false;
+  sigFailures = 0; idTakenTries = 0;
   try { localStorage.removeItem('vt-code'); } catch {}
   $('code').textContent = '······';
   setNet('warn', 'Getting a new code…');
