@@ -52,6 +52,9 @@
   #zoneEditor { position: fixed; inset: 0; display: none; background: transparent; cursor: crosshair; z-index: 10; }
   body.zoning #zoneEditor { display: block; }
   #zoneRect { position: absolute; border: 2px solid var(--accent); background: #b48cff1a; box-shadow: 0 0 0 9999px #0006; border-radius: 4px; }
+  /* idle: the broadcaster hasn't been tracking for a while */
+  body.screen #box, body.screen #anchor { transition: opacity .8s; }
+  body.screen.idle #box, body.screen.idle #anchor { opacity: 0; }
   #zoneHelp { top: 50%; transform: translate(-50%, -50%); cursor: default; font-size: 13px; padding: 14px 18px; }
 </style>
 </head>

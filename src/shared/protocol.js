@@ -36,6 +36,33 @@ export const DEFAULT_POS = { x: 0.85, y: 1, s: 0.5 };
 //   fr = 'bust' | 'full', zoom, px/py = pan in "visible heights", yaw = model turn (rad), el = camera elevation (rad)
 export const DEFAULT_VIEW = { fr: 'bust', zoom: 1, px: 0, py: 0, yaw: 0, el: 0 };
 
+// How the avatar looks (set by the broadcaster, same for every viewer):
+//   vg    = sensitivity of each mouth shape (VRM visemes: aa = A, ee = E, ih = I, oh = O, ou = U)
+//   light = key light colour / intensity / direction (degrees: az 0 = from the camera, + = from the right
+//           of the screen, ±180 = from behind; el + = from above) and the ambient (fill) light
+export const VISEMES = [['aa', 'A'], ['ee', 'E'], ['ih', 'I'], ['oh', 'O'], ['ou', 'U']];
+export const DEFAULT_STYLE = {
+  vg: { aa: 1, ee: 1, ih: 1, oh: 1, ou: 1 },
+  light: { color: '#ffffff', i: 0.9, az: 27, el: 46, amb: 0.45, ambColor: '#ffffff' },
+};
+/** Clean up a style received from the network / storage (anything missing → default). */
+export function normalizeStyle(st = {}) {
+  const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);
+  const col = (v, d) => (/^#[0-9a-f]{6}$/i.test(String(v)) ? String(v).toLowerCase() : d);
+  const D = DEFAULT_STYLE, vg = st.vg || {}, l = st.light || {};
+  return {
+    vg: Object.fromEntries(VISEMES.map(([k]) => [k, num(vg[k], D.vg[k], 0, 3)])),
+    light: {
+      color: col(l.color, D.light.color), i: num(l.i, D.light.i, 0, 3),
+      az: num(l.az, D.light.az, -180, 180), el: num(l.el, D.light.el, -89, 89),
+      amb: num(l.amb, D.light.amb, 0, 2), ambColor: col(l.ambColor, D.light.ambColor),
+    },
+  };
+}
+
+// Full screen viewers hide the avatar after this long without live tracking (paused, face lost, disconnected).
+export const IDLE_HIDE_MS = 30000;
+
 export const HEARTBEAT_MS = 2000;       // both sides ping this often on the model channel
 export const HEARTBEAT_TIMEOUT_MS = 10000; // …and consider the other side gone after this much silence
 export const MOTION_MAX_BUFFERED = 32 * 1024; // skip motion frames while the channel is backed up
@@ -62,6 +89,7 @@ Messages
                            (zone is 0..1 of the viewer's monitor; aspect = monitor width / height; have = cached model id)
                            { t:'need-model' }   cache miss after 'model-use'
     broadcaster -> viewer  { t:'view', fr, zoom, px, py, yaw, el }
+                           { t:'style', vg:{aa,ee,ih,oh,ou}, light:{color,i,az,el,amb,ambColor} }   (see normalizeStyle)
                            { t:'pos', x, y, s }   (only used in 'screen' mode)
     both ways              { t:'hb' } heartbeat · { t:'bye', reason:'ended'|'kicked'|'left'|'full', max? } clean disconnect / room full
 

@@ -40,6 +40,8 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 |---|---|
 | **Pause tracking** | Turns the camera off when you step away. Viewers see your avatar idling (breathing, blinking). Can have a hotkey. |
 | **Movement** | The body follows your head up/down, left/right and forward/back. Each direction has its own sensitivity slider. |
+| **Mouth shapes** | Besides the overall mouth sensitivity, each vowel (A, E, I, O, U) has its own slider, e.g. tone down an over-wide "A" or boost a weak "U". |
+| **Lighting** | Colour, brightness and direction of the main light, plus a fill light (brightness and colour) for the shadows. Viewers see the same lighting. |
 | **Smoothing** | Less jitter vs. more responsiveness. **Link both eyes** stops accidental winks. |
 | **Expressions** | Every expression your model has gets a button; click to toggle. **Right-click** an expression (or *neutral*) to give it a hotkey (Alt+H, Ctrl+Alt+1, F9…); hotkeys work from any app. There are no default hotkeys, only the ones you set. While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / surprised / angry from your face. |
 | **Props** | Add PNG / JPG / GIF / WebP images (animated ones play). Each prop either stays in the scene or is attached to a body part and moves with it. Drag it in the preview, scroll on it to resize, Shift+scroll to rotate. It can also face the camera, be mirrored, get a hotkey to show/hide it, and more. |
@@ -52,7 +54,7 @@ Type the code, choose how to show the avatar, then **Join**:
 
 - **Floating**: a small see-through widget. Drag it, scroll to resize, **Ctrl+Alt+V** to lock it (click-through).
 - **Window**: a normal window.
-- **Full screen**: a click-through layer over a monitor. The broadcaster places the avatar. **Ctrl+Alt+V** opens the zone editor, which limits the avatar to part of the screen.
+- **Full screen**: a click-through layer over a monitor. The broadcaster places the avatar. **Ctrl+Alt+V** opens the zone editor, which limits the avatar to part of the screen. If the broadcaster stops tracking for 30 seconds (paused, away from the camera, or disconnected), the avatar fades out, and it comes back as soon as tracking resumes.
 
 The **control window** (floating and full screen modes) has every action:
 - switch mode or monitor

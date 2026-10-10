@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { ARKIT, ARKIT_INDEX, DEFAULT_VIEW } from './protocol.js';
+import { ARKIT, ARKIT_INDEX, DEFAULT_VIEW, DEFAULT_STYLE, normalizeStyle } from './protocol.js';
 import { FINGER_SEGMENTS } from './arms.js';
 import { PropLayer } from './props.js';
 
@@ -12,6 +12,12 @@ const SIDES = { l: 'left', r: 'right' };
 
 // Expressions driven by tracking (never offered as buttons)
 const TRACKED = new Set(['aa', 'ih', 'ou', 'ee', 'oh', 'blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight', 'neutral']);
+// perfect-sync models: which vowel's sensitivity scales which ARKit shape
+const SYNC_VOWEL = ARKIT.map((n) => ({
+  jawOpen: 'aa', mouthStretchLeft: 'ee', mouthStretchRight: 'ee',
+  mouthUpperUpLeft: 'ih', mouthUpperUpRight: 'ih', mouthLowerDownLeft: 'ih', mouthLowerDownRight: 'ih',
+  mouthFunnel: 'oh', mouthPucker: 'ou',
+})[n] || null);
 const PRESET_ORDER = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 export class AvatarStage {
@@ -31,9 +37,13 @@ export class AvatarStage {
     // How the avatar is shot. Owned by the broadcaster, mirrored on every viewer.
     this.view = { ...DEFAULT_VIEW };
 
-    const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.9);
-    key.position.set(0.6, 1.4, 1.2);
-    this.scene.add(key, new THREE.AmbientLight(0xffffff, Math.PI * 0.45));
+    // lighting + mouth-shape sensitivity: also owned by the broadcaster (see setStyle)
+    this.keyLight = new THREE.DirectionalLight(0xffffff, Math.PI * 0.9);
+    this.keyLight.target.position.set(0, 1, 0);
+    this.ambLight = new THREE.AmbientLight(0xffffff, Math.PI * 0.45);
+    this.scene.add(this.keyLight, this.keyLight.target, this.ambLight);
+    this.setStyle(DEFAULT_STYLE);
+    this.suspended = false; // true = don't render at all (hidden viewer)
 
     this.loader = new GLTFLoader();
     this.loader.register((parser) => new VRMLoaderPlugin(parser));
@@ -95,6 +105,21 @@ export class AvatarStage {
     n.el = Math.max(-0.6, Math.min(0.6, +n.el || 0));
     this.view = n;
     this._frameCamera();
+    return n;
+  }
+
+  /** Lighting and per-mouth-shape sensitivity. Returns the cleaned-up style. */
+  setStyle(st) {
+    const n = normalizeStyle(st);
+    this.style = n;
+    const L = n.light, rad = THREE.MathUtils.degToRad;
+    this.keyLight.color.set(L.color);
+    this.keyLight.intensity = Math.PI * L.i;
+    // direction: az 0 = from the camera, + = from the right of the screen; el + = from above
+    const az = rad(L.az), el = rad(L.el);
+    this.keyLight.position.set(Math.sin(az) * Math.cos(el) * 3, 1 + Math.sin(el) * 3, Math.cos(az) * Math.cos(el) * 3);
+    this.ambLight.color.set(L.ambColor);
+    this.ambLight.intensity = Math.PI * L.amb;
     return n;
   }
 
@@ -186,6 +211,7 @@ export class AvatarStage {
   }
 
   _tick() {
+    if (this.suspended) return;
     if (this.minFrameMs) {
       const now = performance.now();
       if (now - this.lastRenderAt < this.minFrameMs) return;
@@ -250,19 +276,21 @@ export class AvatarStage {
     if (em) {
       const idleBlink = live ? 0 : this._idleBlink(t);
       const smile = (B('mouthSmileLeft') + B('mouthSmileRight')) / 2;
+      const vg = this.style.vg;
       if (this.perfectSync) {
-        for (let i = 0; i < ARKIT.length; i++) if (this.syncMap[i]) em.setValue(this.syncMap[i], cur.b[i]);
+        // per-vowel sensitivity, mapped onto the ARKit shapes that mostly form each vowel
+        for (let i = 0; i < ARKIT.length; i++) if (this.syncMap[i]) em.setValue(this.syncMap[i], clamp01(cur.b[i] * (SYNC_VOWEL[i] ? vg[SYNC_VOWEL[i]] : 1)));
         if (!live) { em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkLeft] ?? 'blinkLeft', idleBlink); em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkRight] ?? 'blinkRight', idleBlink); }
       } else {
         const jaw = B('jawOpen'), pucker = B('mouthPucker'), funnel = B('mouthFunnel');
         const stretch = (B('mouthStretchLeft') + B('mouthStretchRight')) / 2;
         em.setValue('blinkLeft', Math.max(B('eyeBlinkLeft'), idleBlink));
         em.setValue('blinkRight', Math.max(B('eyeBlinkRight'), idleBlink));
-        em.setValue('aa', clamp01(jaw * (1 - pucker * 0.8) * (1 - funnel * 0.6)));
-        em.setValue('oh', clamp01(funnel * 1.2 * Math.min(1, jaw * 3)));
-        em.setValue('ou', clamp01(pucker * 1.1));
-        em.setValue('ee', clamp01(stretch * 1.5 + smile * jaw * 1.2));
-        em.setValue('ih', clamp01(jaw * 0.6 * smile));
+        em.setValue('aa', clamp01(jaw * (1 - pucker * 0.8) * (1 - funnel * 0.6) * vg.aa));
+        em.setValue('oh', clamp01(funnel * 1.2 * Math.min(1, jaw * 3) * vg.oh));
+        em.setValue('ou', clamp01(pucker * 1.1 * vg.ou));
+        em.setValue('ee', clamp01((stretch * 1.5 + smile * jaw * 1.2) * vg.ee));
+        em.setValue('ih', clamp01(jaw * 0.6 * smile * vg.ih));
       }
       // Auto expressions: read the emotion off the face-shape weights (no extra model needed)
       const browUp = B('browInnerUp');

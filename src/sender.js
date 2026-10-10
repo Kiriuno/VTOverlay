@@ -5,6 +5,7 @@ import { FaceLandmarker, PoseLandmarker, HandLandmarker, FilesetResolver } from 
 import { AvatarStage } from './shared/avatar.js';
 import {
   ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT, effectiveZone,
+  VISEMES, DEFAULT_STYLE, normalizeStyle,
   HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, MOTION_MAX_BUFFERED, peerOptions,
 } from './shared/protocol.js';
 import { buildArmPayload } from './shared/arms.js';
@@ -22,7 +23,7 @@ const SEND_INTERVAL_MS = 33; // ~30 Hz
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, exprTune: {}, maxViewers: 0, camId: '' };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -57,6 +58,34 @@ function updateView(patch) {
   if (!viewSendTimer) viewSendTimer = setTimeout(() => { viewSendTimer = null; broadcastControl({ t: 'view', ...view }); }, 50);
 }
 updateView({});
+
+// ---------------- look: lighting + per-vowel mouth sensitivity (viewers get the same) ----------------
+let style = stage.setStyle(settings.style);
+let styleSendTimer = null;
+function updateStyle(patch) {
+  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, light: { ...style.light, ...patch.light } });
+  settings.style = style; saveSettings();
+  if (!styleSendTimer) styleSendTimer = setTimeout(() => { styleSendTimer = null; broadcastControl({ t: 'style', ...style }); }, 80);
+  showStyle();
+}
+$('vowelSliders').innerHTML = VISEMES.map(([k, l]) =>
+  `<div class="slider"><span>${l} <output id="vgOut_${k}"></output></span><input type="range" id="vg_${k}" min="0" max="3" step="0.05"></div>`).join('');
+for (const [k] of VISEMES) $('vg_' + k).oninput = (e) => updateStyle({ vg: { [k]: +e.target.value } });
+$('vowelReset').onclick = () => updateStyle({ vg: DEFAULT_STYLE.vg });
+const LIGHT_INPUTS = { lightColor: 'color', lightI: 'i', lightAz: 'az', lightEl: 'el', lightAmb: 'amb', lightAmbColor: 'ambColor' };
+for (const [id, k] of Object.entries(LIGHT_INPUTS)) {
+  $(id).oninput = (e) => updateStyle({ light: { [k]: e.target.type === 'color' ? e.target.value : +e.target.value } });
+}
+$('lightReset').onclick = () => updateStyle({ light: DEFAULT_STYLE.light });
+function showStyle() {
+  for (const [k] of VISEMES) { $('vg_' + k).value = style.vg[k]; $('vgOut_' + k).textContent = '×' + style.vg[k].toFixed(2); }
+  for (const [id, k] of Object.entries(LIGHT_INPUTS)) $(id).value = style.light[k];
+  $('lightColorHex').textContent = style.light.color; $('lightAmbColorHex').textContent = style.light.ambColor;
+  const { az, el } = style.light;
+  const h = Math.abs(az) > 150 ? 'behind' : Math.abs(az) < 20 ? 'the front' : (az > 0 ? 'the right' : 'the left') + (Math.abs(az) > 110 ? ', behind' : '');
+  $('lightDesc').textContent = `From ${h}, ${el > 20 ? 'above' : el < -20 ? 'below' : 'level'}`;
+}
+showStyle();
 $('frBtn').onclick = () => updateView({ fr: view.fr === 'full' ? 'bust' : 'full', px: 0, py: 0 });
 $('resetView').onclick = () => updateView({ ...DEFAULT_VIEW, fr: view.fr });
 
@@ -529,6 +558,7 @@ function onViewerMessage(id, v, d) {
   if (first) {
     v.model.send({ t: 'props', list: publicProps() });
     v.model.send({ t: 'view', ...view });
+    v.model.send({ t: 'style', ...style });
     offerModel(v);
   }
   updateViewers();

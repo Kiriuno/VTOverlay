@@ -101,6 +101,11 @@
   #hkModal h4 { margin: 0 0 6px; font-size: 15px; }
   #hkCombo { font-size: 22px; font-weight: 700; color: var(--accent); min-height: 32px; margin: 12px 0; font-family: Consolas, ui-monospace, monospace; }
   #hkMsg { min-height: 1.3em; font-size: 12px; }
+  details summary { cursor: pointer; padding: 6px 0; }
+  details[open] summary { color: var(--accent); }
+  .colorRow { display: flex; align-items: center; gap: 8px; }
+  input[type=color] { width: 44px; height: 26px; padding: 0 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); cursor: pointer; }
+  .slider output { font-size: 11px; color: var(--muted); }
   #modelName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
 </style>
 </head>
@@ -114,7 +119,7 @@
     <div id="guide"><span>what viewers see (widget / full screen)</span></div>
     <div id="viewTools"><button id="frBtn">Bust</button><button id="resetView">Reset view</button></div>
     <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: rotate<br>Viewers see exactly this framing</div>
-    <div id="pausedBanner" hidden><b>⏸ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling</div></div>
+    <div id="pausedBanner" hidden><b>⏸ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling<br>(full-screen viewers hide it after 30 s)</div></div>
     <div id="tabs"><button data-tab="avatar" class="on">My avatar</button><button data-tab="place">Place on viewer's screen</button></div>
     <div id="placeView" hidden>
       <div id="placeBar">
@@ -177,6 +182,11 @@
       <div class="slider" title="How much the body follows your head going left and right"><span>Left / right movement</span><input type="range" id="bodyX" min="0" max="3" step="0.05" value="1"></div>
       <div class="slider" title="How much the body follows your head going toward / away from the camera"><span>Forward / back movement</span><input type="range" id="bodyZ" min="0" max="2" step="0.05" value="0.5"></div>
       <div class="slider"><span>Mouth sensitivity</span><input type="range" id="mouthGain" min="0.5" max="3" step="0.05" value="1.6"></div>
+      <details id="vowels"><summary>Mouth shapes (A, E, I, O, U)</summary>
+        <div class="hint muted" style="margin:4px 0 2px">On top of the mouth sensitivity above. Lower one if your avatar over-does that vowel, raise it if it barely shows.</div>
+        <div id="vowelSliders"></div>
+        <button id="vowelReset" style="padding:4px 10px;font-size:12px;margin-top:4px">Reset</button>
+      </details>
       <div class="slider"><span>Blink sensitivity</span><input type="range" id="blinkGain" min="0.5" max="3" step="0.05" value="1.5"></div>
       <div class="hint muted">Wink test: close your <b>right</b> eye. With Mirror on, the eye on the <b>right side</b> of the preview should close (off: the left side). If the other one closes, flip “Swap left/right”.</div>
     </div>
@@ -191,6 +201,18 @@
         <div class="slider"><span>Blinking</span><input type="range" id="tuneBlink" min="0" max="1.5" step="0.05"></div>
         <div class="row"><button id="tuneReset" style="padding:4px 10px;font-size:12px">Reset</button><button id="tuneHk" class="hk" style="padding:4px 10px;font-size:12px">⌨ Hotkey</button></div>
       </div>
+    </div>
+
+    <div class="sec" id="lightSec">
+      <h3>Lighting</h3>
+      <div class="slider"><span>Light colour</span><span class="colorRow"><input type="color" id="lightColor"><span id="lightColorHex" class="muted"></span></span></div>
+      <div class="slider"><span>Brightness</span><input type="range" id="lightI" min="0" max="3" step="0.05"></div>
+      <div class="slider" title="Where the light comes from, as seen in the preview"><span>Direction ← →</span><input type="range" id="lightAz" min="-180" max="180" step="1"></div>
+      <div class="slider" title="From below (left) to from above (right)"><span>Direction ↓ ↑</span><input type="range" id="lightEl" min="-89" max="89" step="1"></div>
+      <div class="slider" title="Soft light that reaches everywhere (fills the shadows)"><span>Fill light</span><input type="range" id="lightAmb" min="0" max="2" step="0.05"></div>
+      <div class="slider"><span>Fill colour</span><span class="colorRow"><input type="color" id="lightAmbColor"><span id="lightAmbColorHex" class="muted"></span></span></div>
+      <div class="row" style="margin-top:4px"><button id="lightReset" style="padding:4px 10px;font-size:12px">Reset lighting</button>
+        <span class="hint muted" id="lightDesc"></span></div>
     </div>
 
     <div class="sec">

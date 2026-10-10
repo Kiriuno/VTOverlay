@@ -1,7 +1,7 @@
 // Receiver: shows a friend's avatar as a floating widget, in a window, or over a whole monitor.
 // How the avatar is framed (bust/full, zoom, position, rotation) is controlled by the broadcaster.
 import { AvatarStage } from './shared/avatar.js';
-import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, peerOptions, effectiveZone } from './shared/protocol.js';
+import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, IDLE_HIDE_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -20,6 +20,7 @@ const store = {
 const stage = new AvatarStage($('stage'), MODE === 'window' ? { maxPixelRatio: 2 } : { maxPixelRatio: MODE === 'screen' ? 1 : 1.5, maxFps: 45 });
 if (MODE === 'screen') $('anchor').appendChild($('status'));
 stage.setView(store.get('vt-view', {})); // last view from the broadcaster until a fresh one arrives
+stage.setStyle(store.get('vt-style', {})); // same for lighting / mouth shapes
 
 // ---------------- status pill ----------------
 let hasModel = false, statusTimer = null;
@@ -33,6 +34,27 @@ function status(state, text, { autoHide = false, retry = false } = {}) {
   if (autoHide) statusTimer = setTimeout(() => { if (!document.body.classList.contains('edit')) $('status').hidden = true; }, 2500);
 }
 $('retryBtn').onclick = () => reconnectNow();
+
+// ---------------- full screen: hide the avatar while the broadcaster isn't tracking ----------------
+// Paused, face out of view or connection lost for IDLE_HIDE_MS → fade the avatar (and its status
+// pill) out and stop rendering; it fades back in on the first live tracking frame.
+let lastLiveAt = performance.now(), idleHidden = false;
+function setIdleHidden(on) {
+  if (on === idleHidden) return;
+  idleHidden = on;
+  document.body.classList.toggle('idle', on);
+  if (on) setTimeout(() => { if (idleHidden) stage.suspended = true; }, 900); // after the fade
+  else stage.suspended = false;
+  if (on) window.vt.reportStatus('warn', 'Avatar hidden — the broadcaster isn\'t tracking');
+  else window.vt.reportStatus($('dot').className.replace('dot', '').trim() || 'ok', $('statusText').textContent || 'Connected');
+}
+if (MODE === 'screen') {
+  setInterval(() => {
+    if (!hasModel) { setIdleHidden(false); return; }
+    if (performance.now() - lastLiveAt > IDLE_HIDE_MS) setIdleHidden(true);
+  }, 1000);
+}
+const markLive = () => { lastLiveAt = performance.now(); if (idleHidden) setIdleHidden(false); };
 
 // ---------------- controls: mode switch + disconnect ----------------
 const MODE_LABELS = { floating: 'Floating', window: 'Window', screen: 'Full screen' };
@@ -231,6 +253,7 @@ async function showModel(buf, id) {
   try {
     await stage.loadVRM(buf, id);
     hasModel = true;
+    lastLiveAt = performance.now(); // give tracking a full grace period after (re)loading
     status('ok', 'Connected', { autoHide: true });
     return true;
   } catch (err) {
@@ -347,6 +370,7 @@ function openChannels() {
       lastSeq = d.n;
     }
     stage.setMotion(d);
+    if (d.f) markLive();
   });
   const lost = () => {
     if (!live()) return;
@@ -446,6 +470,9 @@ async function onModelData(d) {
       store.set('vt-view', v);
       return;
     }
+    case 'style':
+      store.set('vt-style', stage.setStyle(d));
+      return;
     case 'props':
       if (Array.isArray(d.list)) stage.props.sync(d.list.slice(0, 64));
       return;
