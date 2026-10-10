@@ -49,7 +49,7 @@
     <div id="upBar" hidden><i></i></div>
     <div id="upMsg" class="muted"></div>
     <div class="row" id="upButtons"><button class="primary" id="upGo">Update now</button><button id="upNotes">What's new</button><button id="upLater">Later</button></div>
-    <div class="row" style="margin-top:10px"><button id="upCancel" hidden>Skip this time</button></div>
+    <div class="row" style="margin-top:10px"><button id="upCancel" hidden>Cancel</button></div>
   </section>
 
   <section class="card" id="sendCard">
@@ -113,7 +113,6 @@
       $('update').hidden = false;
       $('upTitle').textContent = 'Update available';
       $('upText').textContent = `Version ${r.latest} is out (you have ${r.current}). The download is about ${Math.round((r.size || 0) / 1048576)} MB and VTOverlay restarts by itself.`;
-      if (auto) startUpdate(true); // launched the app → update straight away
     } else if (manual) {
       const msg = { latest: `You're up to date (v${r.current}).`, none: 'No release has been published yet.', dev: 'Running from source — update with git pull.', error: 'Update check failed: ' + r.error }[r.state];
       $('checkUpdates').textContent = msg;

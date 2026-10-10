@@ -15,11 +15,11 @@ const path = require('path');
 const fs = require('fs');
 const updater = require('./updater');
 
-// Started by the updater from its temp folder: copy the new version over the install folder and exit.
-const APPLYING_UPDATE = updater.applyIfRequested();
-
 // Receiver-only builds set "vtReceiverOnly": true in their packaged package.json.
 const PKG = require('./package.json');
+
+// Started by the updater from its temp folder: copy the new version over the install folder and exit.
+const APPLYING_UPDATE = updater.applyIfRequested();
 const RECEIVER_ONLY = !!PKG.vtReceiverOnly || process.argv.includes('--viewer');
 
 // Keep tracking, networking and heartbeats running at full speed when a window is in the background,

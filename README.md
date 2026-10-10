@@ -21,7 +21,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 2. Run `VTOverlay.exe` / `VTOverlay-Viewer.exe`.
 3. Windows SmartScreen may warn the first time because the app isn't code-signed. Click **More info → Run anyway**.
 
-**Updates are automatic.** Each time you launch the app it checks this repo's latest release. If there's a newer one, it downloads it right away (with a progress bar), replaces itself and restarts on the new version. **Skip this time** cancels it if you're about to go live; it will offer again next launch. **Check for updates** is at the bottom of the start screen.
+**Updates:** each time you launch the app it checks this repo's latest release. If there's a newer one, the start screen shows *Update available*; click **Update now** and the app downloads it, replaces itself and restarts (**Cancel** stops a download in progress). **Check for updates** is at the bottom of the start screen.
 
 ---
 

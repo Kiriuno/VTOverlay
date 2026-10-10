@@ -106,13 +106,18 @@ function applyIfRequested() {
   const target = arg('--vt-target'), pid = Number(arg('--vt-wait-pid'));
   const src = path.dirname(process.execPath);
   const log = (m) => { try { fs.appendFileSync(path.join(os.tmpdir(), 'vtoverlay-update.log'), `${new Date().toISOString()} ${m}\n`); } catch {} };
-  process.noAsar = true; // copy app.asar as a file, not as a folder
+  // This helper must never show an error box (on Windows that blocks until someone clicks OK).
+  process.on('uncaughtException', (e) => log('uncaught: ' + (e.stack || e.message)));
+  process.on('unhandledRejection', (e) => log('unhandled: ' + (e?.stack || e)));
   const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
   (async () => {
     try {
       log(`apply: ${src} -> ${target} (waiting for ${pid})`);
       for (let i = 0; i < 300 && pid && alive(pid); i++) await new Promise((r) => setTimeout(r, 100));
       if (!target || !fs.existsSync(target)) throw new Error('install folder not found: ' + target);
+      // Only now (main.js has finished loading from app.asar) switch asar handling off,
+      // so app.asar gets copied as a file instead of being read as a folder.
+      process.noAsar = true;
       let lastErr;
       for (let attempt = 0; attempt < 20; attempt++) { // files can stay locked for a moment (antivirus, Explorer)
         try { fs.cpSync(src, target, { recursive: true, force: true }); lastErr = null; break; } catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 500)); }
