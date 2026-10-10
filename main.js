@@ -176,26 +176,33 @@ ipcMain.handle('get-config', () => ({
   displays: displayList(),
   version: PKG.version,
   justUpdated: process.argv.includes('--vt-updated'),
+  autoUpdate: takeAutoUpdate(), // true only for the first start screen of this launch
   repo: updater.REPO,
 }));
 
 // ---------- updates (GitHub releases) ----------
 let lastUpdateInfo = null;
+let autoUpdateDone = false;
+function takeAutoUpdate() { const first = !autoUpdateDone; autoUpdateDone = true; return first; }
+let updateAbort = null;
+ipcMain.on('update-cancel', () => updateAbort?.abort());
 ipcMain.handle('update-check', async () => {
   lastUpdateInfo = await updater.check({ receiverOnly: RECEIVER_ONLY, version: PKG.version });
   return lastUpdateInfo;
 });
 ipcMain.handle('update-install', async (e) => {
   if (lastUpdateInfo?.state !== 'available') return { ok: false, error: 'No update to install' };
+  updateAbort = new AbortController();
   try {
     await updater.install(lastUpdateInfo, {
       onProgress: (p) => { try { e.sender.send('update-progress', p); } catch {} },
       quit: () => quitApp(),
+      signal: updateAbort.signal,
     });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
-  }
+  } finally { updateAbort = null; }
 });
 ipcMain.on('open-external', (_e, url) => {
   if (/^https:\/\/github\.com\//.test(String(url))) shell.openExternal(url);

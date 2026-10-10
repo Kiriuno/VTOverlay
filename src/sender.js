@@ -154,8 +154,8 @@ async function restoreLastModel() {
 restoreLastModel();
 
 // ---------------- custom hotkeys (global: they work while another app has focus) ----------------
-// Bindings: { 'expr:<name>': accel, 'prop:<id>': accel } — accel in Electron syntax, e.g. "Ctrl+Alt+H".
-// Defaults: Ctrl+Shift+1–9 = expressions 1–9, Ctrl+Shift+0 = neutral (unless you reuse those combos).
+// Bindings: { 'expr:<name>' | 'clear' | 'pause' | 'prop:<id>': accel } — accel in Electron syntax, e.g. "Ctrl+Alt+H".
+// There are no default hotkeys: only the ones you set.
 let hotkeys = (() => { try { return JSON.parse(localStorage.getItem('vt-hotkeys') || '{}') || {}; } catch { return {}; } })();
 let hotkeyStatus = {}; // id -> registered OK?
 const saveHotkeys = () => { try { localStorage.setItem('vt-hotkeys', JSON.stringify(hotkeys)); } catch {} };
@@ -164,12 +164,9 @@ const prettyAccel = (a) => a.replace(/\bnum(\d)\b/, 'Numpad $1').replace(/\bnum(
 let applyTimer = null;
 function applyHotkeys() { clearTimeout(applyTimer); applyTimer = setTimeout(applyHotkeysNow, 30); }
 async function applyHotkeysNow() {
-  const used = new Set(Object.values(hotkeys));
   const list = [];
-  exprList.slice(0, 9).forEach((_, i) => { const a = 'Ctrl+Shift+' + (i + 1); if (!used.has(a)) list.push({ accel: a, id: 'num:' + (i + 1) }); });
-  if (!used.has('Ctrl+Shift+0')) list.push({ accel: 'Ctrl+Shift+0', id: 'clear' });
   for (const [id, accel] of Object.entries(hotkeys)) {
-    const live = id === 'pause' || (id.startsWith('expr:') ? exprList.includes(id.slice(5)) : props.some((p) => 'prop:' + p.id === id));
+    const live = id === 'pause' || id === 'clear' || (id.startsWith('expr:') ? exprList.includes(id.slice(5)) : props.some((p) => 'prop:' + p.id === id));
     if (live) list.push({ accel, id });
   }
   hotkeyStatus = await window.vt.setHotkeys(list);
@@ -180,9 +177,9 @@ function refreshHotkeyBadges() {
   $('pauseHk').textContent = pa ? '⌨ ' + prettyAccel(pa) : '⌨';
   $('pauseHk').classList.toggle('bad', hotkeyStatus.pause === false);
   if (activeExpr) { const a = hotkeys['expr:' + activeExpr]; $('tuneHk').textContent = a ? '⌨ ' + prettyAccel(a) : '⌨ Hotkey'; }
-  document.querySelectorAll('#xrow [data-expr]').forEach((b) => {
+  document.querySelectorAll('#xrow [data-expr], #xrow [data-clear]').forEach((b) => {
     b.querySelector('small')?.remove();
-    const id = 'expr:' + b.dataset.expr, accel = hotkeys[id];
+    const id = b.dataset.clear ? 'clear' : 'expr:' + b.dataset.expr, accel = hotkeys[id];
     if (accel) b.insertAdjacentHTML('beforeend', `<small class="${hotkeyStatus[id] === false ? 'bad' : ''}" title="${hotkeyStatus[id] === false ? 'Another app already uses this combination' : ''}">${prettyAccel(accel)}</small>`);
   });
   document.querySelectorAll('#propList .prop').forEach((row) => {
@@ -195,7 +192,6 @@ function refreshHotkeyBadges() {
 window.vt.onHotkey((id) => {
   if (id === 'pause') return setPaused(!paused);
   if (id === 'clear') return setExpr(null);
-  if (id.startsWith('num:')) return exprByNumber(Number(id.slice(4)));
   if (id.startsWith('expr:')) return toggleExpr(id.slice(5));
   if (id.startsWith('prop:')) { const p = props.find((x) => x.id === id.slice(5)); if (p) updateProp(p.id, { visible: !p.visible }); }
 });
@@ -262,8 +258,7 @@ async function bindHotkey(id, title) {
 }
 
 // ---------------- expressions (whatever the loaded model offers) ----------------
-// Keys use the physical digit row (event.code), so they work on AZERTY/QWERTZ too.
-// Ctrl+Shift+digit does the same from any app (global hotkey, registered by the main process).
+// Click to toggle; right-click to give one your own (global) hotkey.
 let activeExpr = null;
 let exprList = [];
 const prettyExpr = (n) => n.replace(/^Fcl_/, '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
@@ -276,20 +271,21 @@ function buildExpressionButtons(list) {
   const row = $('xrow');
   row.innerHTML = '';
   if (!list.length) { row.innerHTML = '<span class="muted hint">This model has no extra expressions.</span>'; return; }
-  list.forEach((name, i) => {
+  list.forEach((name) => {
     const b = document.createElement('button');
     b.className = 'xbtn'; b.dataset.expr = name; b.title = name;
-    b.innerHTML = `${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}${prettyExpr(name).replace(/</g, '&lt;')}`;
+    b.textContent = prettyExpr(name);
     b.onclick = () => toggleExpr(name);
     b.oncontextmenu = (e) => { e.preventDefault(); bindHotkey('expr:' + name, `Hotkey for “${prettyExpr(name)}”`); };
-    const accel = hotkeys['expr:' + name];
-    if (accel) b.insertAdjacentHTML('beforeend', `<small class="${hotkeyStatus['expr:' + name] === false ? 'bad' : ''}">${prettyAccel(accel)}</small>`);
     row.appendChild(b);
   });
   const clr = document.createElement('button');
-  clr.className = 'xbtn'; clr.innerHTML = '<kbd>0</kbd>neutral'; clr.onclick = () => setExpr(null);
+  clr.className = 'xbtn'; clr.dataset.clear = '1'; clr.textContent = 'neutral'; clr.title = 'Back to your normal face';
+  clr.onclick = () => setExpr(null);
+  clr.oncontextmenu = (e) => { e.preventDefault(); bindHotkey('clear', 'Hotkey for “neutral” (clears the expression)'); };
   row.appendChild(clr);
   setExpr(activeExpr);
+  refreshHotkeyBadges();
 }
 function setExpr(name) {
   activeExpr = name;
@@ -318,17 +314,6 @@ $('tuneBlink').oninput = () => setTune({ blink: Number($('tuneBlink').value) });
 $('tuneReset').onclick = () => { setTune({ mouth: 1, blink: 1 }); showExprTune(); };
 $('tuneHk').onclick = () => activeExpr && bindHotkey('expr:' + activeExpr, `Hotkey for “${prettyExpr(activeExpr)}”`);
 const toggleExpr = (name) => setExpr(activeExpr === name ? null : name);
-function exprByNumber(n) {
-  if (n === 0) return setExpr(null);
-  const name = exprList[n - 1];
-  if (name) toggleExpr(name);
-}
-window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
-  if (e.ctrlKey || e.altKey || e.metaKey) return;
-  const m = /^(?:Digit|Numpad)(\d)$/.exec(e.code);
-  if (m) exprByNumber(Number(m[1]));
-});
 buildExpressionButtons([]);
 
 // ---------------- networking (PeerJS / WebRTC) ----------------

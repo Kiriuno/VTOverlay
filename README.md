@@ -21,7 +21,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 2. Run `VTOverlay.exe` / `VTOverlay-Viewer.exe`.
 3. Windows SmartScreen may warn the first time because the app isn't code-signed. Click **More info → Run anyway**.
 
-**Updates are automatic.** When a new release is out, the start screen shows *Update available*. Click **Update now**, and the app downloads it, replaces itself and restarts. You can also click **Check for updates** at the bottom of the start screen.
+**Updates are automatic.** Each time you launch the app it checks this repo's latest release. If there's a newer one, it downloads it right away (with a progress bar), replaces itself and restarts on the new version. **Skip this time** cancels it if you're about to go live; it will offer again next launch. **Check for updates** is at the bottom of the start screen.
 
 ---
 
@@ -41,7 +41,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 | **Pause tracking** | Turns the camera off when you step away. Viewers see your avatar idling (breathing, blinking). Can have a hotkey. |
 | **Movement** | The body follows your head up/down, left/right and forward/back. Each direction has its own sensitivity slider. |
 | **Smoothing** | Less jitter vs. more responsiveness. **Link both eyes** stops accidental winks. |
-| **Expressions** | Every expression your model has gets a button. Keys **1–9** toggle them, **0** clears, and **Ctrl+Shift+1–9** work from any app. **Right-click** an expression to give it your own hotkey (Alt+H, Ctrl+Alt+1, F9…). While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / surprised / angry from your face. |
+| **Expressions** | Every expression your model has gets a button; click to toggle. **Right-click** an expression (or *neutral*) to give it a hotkey (Alt+H, Ctrl+Alt+1, F9…); hotkeys work from any app. There are no default hotkeys, only the ones you set. While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / surprised / angry from your face. |
 | **Props** | Add PNG / JPG / GIF / WebP images (animated ones play). Each prop either stays in the scene or is attached to a body part and moves with it. Drag it in the preview, scroll on it to resize, Shift+scroll to rotate. It can also face the camera, be mirrored, get a hotkey to show/hide it, and more. |
 | **Arms & hands** *(beta)* | Follows your arms and fingers when they're in the camera view. |
 | **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. They can share that screen with you so you see where you're putting it. |

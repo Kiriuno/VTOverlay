@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('vt', {
   copyText: (text) => ipcRenderer.send('copy-text', text),
   checkUpdate: () => ipcRenderer.invoke('update-check'),
   installUpdate: () => ipcRenderer.invoke('update-install'),
+  cancelUpdate: () => ipcRenderer.send('update-cancel'),
   onUpdateProgress: (cb) => ipcRenderer.on('update-progress', (_e, p) => cb(p)),
   openExternal: (url) => ipcRenderer.send('open-external', url),
   setHotkeys: (list) => ipcRenderer.invoke('set-hotkeys', list),

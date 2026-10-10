@@ -52,14 +52,15 @@ async function check({ receiverOnly, version }) {
   };
 }
 
-async function download(url, file, onProgress) {
-  const res = await net.fetch(url, { headers: { 'User-Agent': 'VTOverlay-updater', Accept: 'application/octet-stream' } });
+async function download(url, file, onProgress, signal) {
+  const res = await net.fetch(url, { headers: { 'User-Agent': 'VTOverlay-updater', Accept: 'application/octet-stream' }, signal });
   if (!res.ok) throw new Error(`download failed (${res.status})`);
   const total = Number(res.headers.get('content-length')) || 0;
   const out = fs.createWriteStream(file);
   const reader = res.body.getReader();
   let got = 0;
   for (;;) {
+    if (signal?.aborted) { reader.cancel().catch(() => {}); out.destroy(); throw new Error('cancelled'); }
     const { done, value } = await reader.read();
     if (done) break;
     got += value.length;
@@ -69,11 +70,17 @@ async function download(url, file, onProgress) {
   await new Promise((r, j) => out.end((e) => (e ? j(e) : r())));
 }
 
-async function install(info, { onProgress, quit }) {
+async function install(info, { onProgress, quit, signal }) {
   if (!app.isPackaged && !process.env.VT_UPDATE_API) throw new Error('Running from source — use git pull instead.');
   const work = fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX));
   const zip = path.join(work, 'update.zip');
-  await download(info.url, zip, (f) => onProgress?.({ phase: 'download', fraction: f }));
+  try {
+    await download(info.url, zip, (f) => onProgress?.({ phase: 'download', fraction: f }), signal);
+  } catch (err) {
+    fs.rmSync(work, { recursive: true, force: true });
+    throw signal?.aborted ? new Error('cancelled') : err;
+  }
+  if (signal?.aborted) { fs.rmSync(work, { recursive: true, force: true }); throw new Error('cancelled'); }
   onProgress?.({ phase: 'extract', fraction: 1 });
   const extract = require('extract-zip');
   const dir = path.join(work, 'files');

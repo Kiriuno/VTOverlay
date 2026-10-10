@@ -49,6 +49,7 @@
     <div id="upBar" hidden><i></i></div>
     <div id="upMsg" class="muted"></div>
     <div class="row" id="upButtons"><button class="primary" id="upGo">Update now</button><button id="upNotes">What's new</button><button id="upLater">Later</button></div>
+    <div class="row" style="margin-top:10px"><button id="upCancel" hidden>Skip this time</button></div>
   </section>
 
   <section class="card" id="sendCard">
@@ -103,7 +104,7 @@
 
   // ---- updates ----
   let upInfo = null;
-  async function checkUpdates(manual) {
+  async function checkUpdates(manual, auto = false) {
     $('checkUpdates').textContent = 'Checking…';
     const r = await window.vt.checkUpdate();
     upInfo = r;
@@ -112,6 +113,7 @@
       $('update').hidden = false;
       $('upTitle').textContent = 'Update available';
       $('upText').textContent = `Version ${r.latest} is out (you have ${r.current}). The download is about ${Math.round((r.size || 0) / 1048576)} MB and VTOverlay restarts by itself.`;
+      if (auto) startUpdate(true); // launched the app → update straight away
     } else if (manual) {
       const msg = { latest: `You're up to date (v${r.current}).`, none: 'No release has been published yet.', dev: 'Running from source — update with git pull.', error: 'Update check failed: ' + r.error }[r.state];
       $('checkUpdates').textContent = msg;
@@ -121,20 +123,30 @@
   $('checkUpdates').onclick = () => checkUpdates(true);
   $('upLater').onclick = () => { $('update').hidden = true; };
   $('upNotes').onclick = () => upInfo?.page && window.vt.openExternal(upInfo.page);
-  $('upGo').onclick = async () => {
-    $('upButtons').hidden = true; $('upBar').hidden = false; $('upMsg').textContent = 'Downloading…';
+  async function startUpdate(auto) {
+    $('upTitle').textContent = `Updating to v${upInfo.latest}…`;
+    $('upButtons').hidden = true; $('upCancel').hidden = false; $('upBar').hidden = false; $('upMsg').textContent = 'Downloading…';
     const r = await window.vt.installUpdate();
-    if (!r.ok) { $('upMsg').textContent = 'Update failed: ' + r.error; $('upButtons').hidden = false; $('upBar').hidden = true; }
-  };
+    $('upCancel').hidden = true;
+    if (r.ok) return;
+    $('upBar').hidden = true;
+    if (r.error === 'cancelled') { $('update').hidden = true; return; }
+    $('upTitle').textContent = 'Update available';
+    $('upMsg').textContent = 'Update failed: ' + r.error;
+    $('upButtons').hidden = false;
+  }
+  $('upGo').onclick = () => startUpdate(false);
+  $('upCancel').onclick = () => { $('upMsg').textContent = 'Cancelling…'; window.vt.cancelUpdate(); };
   window.vt.onUpdateProgress((p) => {
     $('upBar').firstElementChild.style.width = Math.round(p.fraction * 100) + '%';
     $('upMsg').textContent = p.phase === 'download' ? `Downloading… ${Math.round(p.fraction * 100)}%` : 'Installing — VTOverlay will restart in a moment…';
+    if (p.phase !== 'download') $('upCancel').hidden = true;
   });
 
   window.vt.getConfig().then((cfg) => {
     $('version').textContent = 'v' + cfg.version;
     if (cfg.justUpdated) { $('update').hidden = false; $('upTitle').textContent = `Updated to v${cfg.version} ✓`; $('upText').textContent = 'Everything is ready.'; $('upButtons').hidden = true; setTimeout(() => { $('update').hidden = true; }, 6000); }
-    else checkUpdates(false);
+    else checkUpdates(false, cfg.autoUpdate);
     if (cfg.receiverOnly) { $('sendCard').hidden = true; $('viewerTag').hidden = false; document.querySelector('.sub').textContent = "See a friend's avatar on your desktop, live."; document.title = 'VTOverlay Viewer'; }
     const saved = store.get('rx-display', null);
     $('display').innerHTML = cfg.displays.map((d) => `<option value="${d.id}">${d.label}</option>`).join('');
