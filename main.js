@@ -419,6 +419,14 @@ function setClickThrough(on) {
   }
 }
 
+// A click-through overlay (full screen, or a locked floating widget) briefly takes the mouse while the
+// cursor is over a part of the avatar that can be grabbed (hair, clothes…), and gives it back after.
+ipcMain.on('overlay-capture-mouse', (_e, on) => {
+  if (!overlayWin || overlayWin.isDestroyed()) return;
+  const clickThrough = (rx.mode === 'screen' && !rx.editingZone) || (rx.mode === 'floating' && rx.locked);
+  if (clickThrough) overlayWin.setIgnoreMouseEvents(!on, { forward: true });
+});
+
 // floating mode: locked = click-through
 function setLocked(locked) {
   rx.locked = locked;

@@ -8,14 +8,15 @@ import {
   VISEMES, DEFAULT_STYLE, normalizeStyle,
   HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, MOTION_MAX_BUFFERED, peerOptions,
 } from './shared/protocol.js';
-import { buildArmPayload } from './shared/arms.js';
+import { buildArmPayload, ArmTracker } from './shared/arms.js';
 import { OneEuroArray } from './shared/filters.js';
 import { PROP_ATTACH } from './shared/props.js';
+import { SpringGrabber } from './shared/grab.js';
 
 const $ = (id) => document.getElementById(id);
 const MODEL_URLS = {
   face: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-  pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
   hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
 };
 const SEND_INTERVAL_MS = 33; // ~30 Hz
@@ -23,7 +24,7 @@ const SEND_INTERVAL_MS = 33; // ~30 Hz
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, armSmoothing: 0.6, viewerGrab: false, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -34,20 +35,30 @@ function saveSettings() { try { localStorage.setItem('vt-settings', JSON.stringi
 const applyToggles = () => {
   document.body.classList.toggle('camHidden', settings.hideCam);
   $('armsHint').hidden = !settings.arms;
+  $('armSmoothRow').hidden = !settings.arms;
   if (settings.arms) initBodyTrackers();
 };
-for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes']) {
+for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab']) {
   $(k).checked = settings[k];
-  $(k).onchange = () => { settings[k] = $(k).checked; saveSettings(); applyToggles(); };
+  $(k).onchange = () => {
+    settings[k] = $(k).checked; saveSettings(); applyToggles();
+    if (k === 'arms' && !paused) openCamera(); // switch camera resolution (720p for hands)
+    if (k === 'viewerGrab') setViewerGrab(settings.viewerGrab);
+  };
 }
-for (const k of ['mouthGain', 'blinkGain', 'smoothing', 'bodyX', 'bodyY', 'bodyZ']) {
+for (const k of ['mouthGain', 'blinkGain', 'smoothing', 'bodyX', 'bodyY', 'bodyZ', 'armSmoothing']) {
   $(k).value = settings[k];
-  $(k).oninput = () => { settings[k] = parseFloat($(k).value); saveSettings(); if (k === 'smoothing') tuneFilters(); };
+  $(k).oninput = () => {
+    settings[k] = parseFloat($(k).value); saveSettings();
+    if (k === 'smoothing') tuneFilters();
+    if (k === 'armSmoothing') armTracker.setSmoothing(settings.armSmoothing);
+  };
 }
 
 // ---------------- avatar preview + view controls (viewers see the same framing) ----------------
 const stage = new AvatarStage($('stage'));
 let view = stage.setView(loadJSON('vt-view', DEFAULT_VIEW));
+window.vtStage = stage; // handy from the dev tools (and for tests)
 function loadJSON(k, d) { try { return { ...d, ...JSON.parse(localStorage.getItem(k) || '{}') }; } catch { return { ...d }; } }
 
 let viewSendTimer = null;
@@ -94,7 +105,7 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const delta = e.deltaY || e.deltaX; // Shift+wheel arrives as horizontal scroll on Windows
-  const hit = stage.props.pick(rayAt(e));
+  const hit = pickProp(e);
   if (hit) { // scroll on a prop: resize it (Shift: rotate it)
     selectProp(hit.id);
     const d = props.find((p) => p.id === hit.id);
@@ -459,6 +470,7 @@ function dropViewer(id) {
   const v = viewers.get(id);
   if (!v) return;
   viewers.delete(id);
+  if (stage.grabs.has('v' + v.n)) { stage.setGrab('v' + v.n, -1, null); relayGrab(id, { t: 'grab', k: 'v' + v.n, j: -1, p: null }); }
   try { v.call?.close(); v.model?.close(); v.motion?.close(); } catch {}
   updateViewers();
 }
@@ -471,6 +483,19 @@ setInterval(() => {
     if (now - v.lastHeard > HEARTBEAT_TIMEOUT_MS) dropViewer(id);
   }
 }, HEARTBEAT_MS);
+
+/** Send a viewer's grab to everyone else. */
+function relayGrab(fromId, msg) {
+  for (const [id, v] of viewers) if (id !== fromId && v.model?.open) { try { v.model.send(msg); } catch {} }
+}
+function setViewerGrab(on) {
+  broadcastControl({ t: 'perm', grab: on });
+  if (!on) for (const v of viewers.values()) {
+    if (!stage.grabs.has('v' + v.n)) continue;
+    stage.setGrab('v' + v.n, -1, null);
+    broadcastControl({ t: 'grab', k: 'v' + v.n, j: -1, p: null });
+  }
+}
 
 function broadcastControl(msg) {
   for (const v of viewers.values()) if (v.model?.open) { try { v.model.send(msg); } catch {} }
@@ -500,6 +525,18 @@ $('newCode').onclick = async () => {
 };
 window.vt.onAppClosing(async () => { await sayBye('ended'); window.vt.goodbyeSent(); });
 
+// What this viewer currently sees (reported by the viewer itself; older viewers don't report).
+function viewerSees(v) {
+  const rx = v.rx;
+  if (!v.motion?.open || !v.model?.open) return ['warn', 'Connecting…', 'The connection is still being set up'];
+  if (!rx) return [modelBuf ? 'warn' : 'muted', modelBuf ? 'Connected' : 'Waiting for your avatar', 'This viewer runs an older version and doesn\'t report what it sees'];
+  if (rx.s === 'loading') return ['warn', `Loading your avatar… ${Math.round((rx.p || 0) * 100)}%`, 'Your model is being sent / loaded on their side'];
+  if (rx.s === 'error') return ['bad', 'Avatar failed to load', 'Their app couldn\'t open your model'];
+  if (rx.s === 'hidden') return ['muted', 'Avatar hidden (you\'re not tracking)', 'Full screen hides your avatar after 30 s without tracking'];
+  if (rx.s === 'ready') return ['ok', '● Sees you', 'Your avatar is on their screen'];
+  return ['muted', modelBuf ? 'Waiting for your avatar' : 'Waiting — load an avatar', ''];
+}
+
 const MODE_LABEL = { floating: 'floating widget', window: 'window', screen: 'full screen' };
 const viewerLabel = (v) => v.state?.name || `Viewer ${v.n}`;
 
@@ -519,7 +556,12 @@ function updateViewers() {
       row.className = 'vrow';
       const extra = v.state ? ` — ${MODE_LABEL[v.state.mode] || v.state.mode}${v.state.sharing ? ', sharing screen' : ''}` : '';
       const label = document.createElement('span');
+      label.className = 'vlabel';
       label.textContent = viewerLabel(v) + extra;
+      const [cls, text, tip] = viewerSees(v);
+      const badge = document.createElement('span');
+      badge.className = 'vsee ' + cls; badge.textContent = text; badge.title = tip;
+      label.append(document.createElement('br'), badge);
       const kick = document.createElement('button');
       kick.textContent = '✕'; kick.title = 'Disconnect this viewer';
       kick.onclick = async () => {
@@ -545,6 +587,15 @@ function onViewerMessage(id, v, d) {
   v.lastHeard = performance.now();
   if (!d || typeof d !== 'object') return;
   if (d.t === 'bye') { dropViewer(id); return; }
+  if (d.t === 'grab') {
+    if (!settings.viewerGrab) return;
+    const j = Number.isInteger(d.j) ? d.j : -1;
+    const p = Array.isArray(d.p) && d.p.length === 3 && d.p.every(Number.isFinite) ? d.p : null;
+    stage.setGrab('v' + v.n, j, p, true);
+    relayGrab(id, { t: 'grab', k: 'v' + v.n, j, p });
+    return;
+  }
+  if (d.t === 'rx') { v.rx = { s: String(d.s), p: Math.max(0, Math.min(1, +d.p || 0)) }; updateViewers(); return; }
   if (d.t === 'need-model') { if (v.model?.open) sendModel(v.model); return; }
   if (d.t === 'need-prop') { if (v.model?.open) sendPropImage(v.model, String(d.hash)); return; }
   if (d.t !== 'viewer') return;
@@ -559,6 +610,7 @@ function onViewerMessage(id, v, d) {
     v.model.send({ t: 'props', list: publicProps() });
     v.model.send({ t: 'view', ...view });
     v.model.send({ t: 'style', ...style });
+    v.model.send({ t: 'perm', grab: !!settings.viewerGrab });
     offerModel(v);
   }
   updateViewers();
@@ -625,6 +677,22 @@ function refreshViewerSelect() {
 }
 $('viewerSel').onchange = () => { selectedViewer = $('viewerSel').value; renderPlacement(); };
 
+const FULL_AREA = { x: 0, y: 0, w: 1, h: 1 };
+// Let the avatar use the taskbar's strip too (e.g. the viewer watches a full-screen video, where the
+// taskbar is hidden and an avatar parked above it would float over nothing). Switching keeps the
+// avatar where it is on their screen: its position is re-expressed in the new area.
+$('overTaskbar').onchange = () => {
+  const v = viewers.get(selectedViewer);
+  if (!v?.state) return;
+  const tb = $('overTaskbar').checked;
+  const from = effectiveZone(v.state.zone, v.pos.tb ? FULL_AREA : v.state.work);
+  const to = effectiveZone(v.state.zone, tb ? FULL_AREA : v.state.work);
+  const ax = from.x + v.pos.x * from.w, ay = from.y + v.pos.y * from.h, ah = v.pos.s * from.h;
+  v.pos = { ...v.pos, tb, x: (ax - to.x) / to.w, y: (ay - to.y) / to.h, s: ah / to.h };
+  renderPlacement(); // lays the zone out for the new area first…
+  updatePos(v, {});  // …then clamps (back above the taskbar when switching off) and sends
+};
+
 function zoneRectPx() {
   const zb = $('zoneBox');
   return { w: zb.clientWidth || 1, h: zb.clientHeight || 1 };
@@ -669,11 +737,14 @@ function renderPlacement() {
   for (const b of bars) {
     const el = document.createElement('div');
     el.className = 'taskbar';
-    el.textContent = 'taskbar';
+    el.textContent = v.pos.tb ? 'taskbar — avatar can go over it' : 'taskbar';
     Object.assign(el.style, { left: b.left + '%', top: b.top + '%', width: b.width + '%', height: b.height + '%' });
     $('screenBox').insertBefore(el, $('zoneBox'));
   }
-  const z = effectiveZone(v.state.zone, wk), zb = $('zoneBox').style;
+  const z = effectiveZone(v.state.zone, v.pos.tb ? FULL_AREA : wk), zb = $('zoneBox').style;
+  $('overTaskbar').checked = !!v.pos.tb;
+  $('overTaskbarRow').hidden = !bars.length;
+  $('screenBox').classList.toggle('overTb', !!v.pos.tb);
   zb.left = z.x * 100 + '%'; zb.top = z.y * 100 + '%'; zb.width = z.w * 100 + '%'; zb.height = z.h * 100 + '%';
 
   const vid = $('screenVid');
@@ -698,7 +769,7 @@ function sendPos(v, force = false) {
   clearTimeout(posSendTimer);
   if (!force && now - lastPosSend < 50) { posSendTimer = setTimeout(() => sendPos(v, true), 50); return; }
   lastPosSend = now;
-  if (v.model?.open) v.model.send({ t: 'pos', x: v.pos.x, y: v.pos.y, s: v.pos.s });
+  if (v.model?.open) v.model.send({ t: 'pos', x: v.pos.x, y: v.pos.y, s: v.pos.s, tb: !!v.pos.tb });
 }
 
 function updatePos(v, patch) {
@@ -839,6 +910,7 @@ function renderPropList() {
     row.innerHTML = `
       <div class="top"><img alt="">
         <span class="nm"></span>
+        <button data-a="lock" title="Lock: can't be moved in the preview by accident"></button>
         <button data-a="vis" title="Show / hide"></button>
         <button data-a="hk" class="hk"></button>
         <button data-a="del" title="Remove">✕</button></div>
@@ -857,6 +929,7 @@ function renderPropList() {
     row.querySelector('.nm').onclick = () => selectProp(selectedProp === d.id ? null : d.id);
     row.querySelector('img').onclick = () => selectProp(d.id);
     row.querySelector('[data-a=vis]').onclick = () => updateProp(d.id, { visible: !d.visible });
+    row.querySelector('[data-a=lock]').onclick = () => { updateProp(d.id, { locked: !d.locked }); if (d.locked && selectedProp === d.id) selectProp(null); };
     row.querySelector('[data-a=hk]').onclick = () => bindHotkey('prop:' + d.id, `Hotkey to show / hide “${propLabels[d.id] || 'prop'}”`);
     row.querySelector('[data-a=del]').onclick = () => removeProp(d.id);
     row.querySelector('[data-a=up]').onclick = () => { props.splice(i, 1); props.splice(i + 1, 0, d); commitProps(); };
@@ -881,6 +954,8 @@ function syncPropInputs() {
     const d = props.find((p) => p.id === row.dataset.id);
     if (!d) return;
     row.querySelector('[data-a=vis]').textContent = d.visible ? 'Hide' : 'Show';
+    row.querySelector('[data-a=lock]').textContent = d.locked ? '🔒' : '🔓';
+    row.querySelector('[data-a=lock]').classList.toggle('on', !!d.locked);
     row.style.opacity = d.visible ? '' : '.6';
     const set = (k, v) => { const el = row.querySelector(`[data-k=${k}]`); if (el && document.activeElement !== el) { if (el.type === 'checkbox') el.checked = v; else el.value = v; } };
     set('attach', d.attach); set('face', !!d.face); set('flip', !!d.flip);
@@ -896,11 +971,29 @@ function rayAt(e) {
   raycaster.setFromCamera(ndc, stage.camera);
   return raycaster;
 }
+// locked props (or all of them with "Lock all") can't be grabbed, resized or rotated in the preview
+let propsLocked = !!settings.propsLocked;
+const pickProp = (e) => (propsLocked ? null : stage.props.pick(rayAt(e), (d) => !props.find((p) => p.id === d.id)?.locked));
+$('lockAll').onclick = () => {
+  propsLocked = settings.propsLocked = !propsLocked; saveSettings(); showLockAll();
+  if (propsLocked) selectProp(null);
+};
+function showLockAll() {
+  $('lockAll').textContent = propsLocked ? '🔒 All props locked' : '🔓 Lock all';
+  $('lockAll').classList.toggle('on', propsLocked);
+}
+showLockAll();
+// pulling hair / clothes: your own pulls are shown to every viewer
+const grabber = new SpringGrabber(stage, canvas, { send: (j, p) => broadcastControl({ t: 'grab', k: 'b', j, p }) });
 let propDrag = null;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
-  const hit = stage.props.pick(rayAt(e));
-  if (!hit) { selectProp(null); return; }
+  const hit = pickProp(e);
+  if (!hit) {
+    selectProp(null);
+    if (grabber.begin(e)) { canvas.setPointerCapture(e.pointerId); canvas.style.cursor = 'grabbing'; }
+    return;
+  }
   selectProp(hit.id);
   canvas.setPointerCapture(e.pointerId);
   const normal = stage.camera.getWorldDirection(new THREE.Vector3());
@@ -908,6 +1001,7 @@ canvas.addEventListener('pointerdown', (e) => {
   canvas.style.cursor = 'grabbing';
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (grabber.grabbing) { grabber.move(e); return; }
   if (propDrag) {
     const p = rayAt(e).ray.intersectPlane(propDrag.plane, new THREE.Vector3());
     if (!p) return;
@@ -916,9 +1010,12 @@ canvas.addEventListener('pointermove', (e) => {
     if (pos) updateProp(propDrag.id, { pos });
     return;
   }
-  if (!viewDrag) canvas.style.cursor = stage.props.pick(rayAt(e)) ? 'grab' : '';
+  if (!viewDrag) canvas.style.cursor = pickProp(e) || grabber.over(e) >= 0 ? 'grab' : '';
 });
-const endPropDrag = () => { if (propDrag) { propDrag = null; canvas.style.cursor = ''; } };
+const endPropDrag = () => {
+  if (grabber.grabbing) { grabber.end(); canvas.style.cursor = ''; }
+  if (propDrag) { propDrag = null; canvas.style.cursor = ''; }
+};
 canvas.addEventListener('pointerup', endPropDrag);
 canvas.addEventListener('pointercancel', endPropDrag);
 window.addEventListener('keydown', (e) => {
@@ -949,7 +1046,8 @@ async function openCamera() {
   setTrack('warn', 'Starting camera…');
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: settings.camId ? { exact: settings.camId } : undefined, width: 640, height: 480, frameRate: 30 },
+      // arm/hand tracking needs more pixels (hands are small in the image); face alone is fine at 480p
+      video: { deviceId: settings.camId ? { exact: settings.camId } : undefined, ...(settings.arms ? { width: 1280, height: 720 } : { width: 640, height: 480 }), frameRate: 30 },
       audio: false,
     });
   } catch (err) {
@@ -1061,9 +1159,39 @@ const MOUTH_IDX = ARKIT.map((n, i) => (/^(jaw|mouth)/.test(n) || n === 'cheekPuf
 let lastVideoTime = -1, lastSend = 0, lastFace = false;
 tuneFilters();
 
+// ---- hold the last pose when you leave the frame / turn away ----
+// When the face disappears we look at the last frames before it did: if the face was touching (or
+// moving toward) the edge of the image, or the head was turned / tilted far, you've gone out of view
+// on purpose → keep sending that last pose. If it vanished in the middle of the frame while facing
+// the camera (bad light, hand over the face…), behave as before and ease back to rest.
+const HOLD_EDGE = 0.04, HOLD_YAW = 32 * Math.PI / 180, HOLD_PITCH = 26 * Math.PI / 180;
+let lastGood = null; // { frame, box:{x0,y0,x1,y1}, cx, cy, vx, vy, yaw, pitch, t }
+let holding = false;
+function shouldHold(g, nowMs) {
+  if (!g || nowMs - g.t > 1500) return false; // stale: we'd been without a face for a while already
+  const { box } = g;
+  if (box.x0 < HOLD_EDGE || box.y0 < HOLD_EDGE || box.x1 > 1 - HOLD_EDGE || box.y1 > 1 - HOLD_EDGE) return true;
+  const px = g.cx + g.vx * 0.25, py = g.cy + g.vy * 0.25; // where the face was heading (¼ s ahead)
+  const hw = (box.x1 - box.x0) / 2, hh = (box.y1 - box.y0) / 2;
+  if (px - hw < 0 || px + hw > 1 || py - hh < 0 || py + hh > 1) return true;
+  return Math.abs(g.yaw) > HOLD_YAW || Math.abs(g.pitch) > HOLD_PITCH;
+}
+function holdFrame() {
+  const f = lastGood.frame;
+  const b = f.b.slice();
+  for (const i of BLINK_IDX) b[i] = 0; // viewers blink on their own while holding
+  return { ...f, b, h: true, x: activeExpr, ae: settings.autoExpr };
+}
+
 function buildFrame(result, nowMs) {
   const face = !!(result.faceBlendshapes?.length && result.facialTransformationMatrixes?.length);
-  if (!face) { prevQ = null; filters.head.reset(); filters.face.reset(); return { t: 'm', f: false, x: activeExpr, ae: settings.autoExpr }; }
+  if (!face) {
+    prevQ = null; filters.head.reset(); filters.face.reset();
+    if (holding || shouldHold(lastGood, nowMs)) { holding = true; return holdFrame(); }
+    lastGood = null;
+    return { t: 'm', f: false, x: activeExpr, ae: settings.autoExpr };
+  }
+  holding = false;
   const t = nowMs / 1000;
 
   // --- head pose ---
@@ -1074,6 +1202,7 @@ function buildFrame(result, nowMs) {
   if (!calib.pos) { calib.pos = rawP.clone(); } // first frame = default centre (rotation stays absolute until calibrated)
   const q = calib.qInv.clone().multiply(rawQ);
   const p = rawP.clone().sub(calib.pos).multiplyScalar(0.01); // cm -> m
+  const eul = new THREE.Euler().setFromQuaternion(q, 'YXZ'); // for the "turned away" check
   // how much the body follows the head (viewers move the whole avatar by p)
   p.set(p.x * settings.bodyX, p.y * settings.bodyY, p.z * settings.bodyZ);
   p.clampLength(0, 0.6);
@@ -1109,17 +1238,31 @@ function buildFrame(result, nowMs) {
     for (const i of BLINK_IDX) b[i] = Math.min(1, b[i] * tune.blink);
   }
 
-  return {
+  const frame = {
     t: 'm', f: true, x: activeExpr, ae: settings.autoExpr,
     q: q.toArray().map((v) => +v.toFixed(4)),
     p: p.toArray().map((v) => +v.toFixed(4)),
     b: b.map((v) => +Math.max(0, v).toFixed(3)),
   };
+  // remember where the face was (image space) for the out-of-frame check
+  const lm = result.faceLandmarks?.[0];
+  if (lm?.length) {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const pt of lm) { if (pt.x < x0) x0 = pt.x; if (pt.x > x1) x1 = pt.x; if (pt.y < y0) y0 = pt.y; if (pt.y > y1) y1 = pt.y; }
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const dt = lastGood ? Math.max(0.001, (nowMs - lastGood.t) / 1000) : 0;
+    const k = 0.4; // smoothed velocity (image widths per second)
+    const vx = lastGood && dt < 0.3 ? lastGood.vx + ((cx - lastGood.cx) / dt - lastGood.vx) * k : 0;
+    const vy = lastGood && dt < 0.3 ? lastGood.vy + ((cy - lastGood.cy) / dt - lastGood.vy) * k : 0;
+    lastGood = { frame, box: { x0, y0, x1, y1 }, cx, cy, vx, vy, yaw: eul.y, pitch: eul.x, t: nowMs };
+  }
+  return frame;
 }
 
 // Timer-driven, not requestAnimationFrame: animation frames stop when this window is minimised or
 // covered (e.g. by a game), which used to freeze the avatar on the viewers' side.
-let frameSeq = 0;
+let frameSeq = 0, lastArms = null;
+const armTracker = new ArmTracker(settings.armSmoothing);
 let paused = false, lastPausedSend = 0;
 function loop() {
   setTimeout(loop, 8);
@@ -1142,11 +1285,18 @@ function loop() {
   const frame = buildFrame(landmarker.detectForVideo(video, now), now);
   if (settings.arms && poseLandmarker && handLandmarker) {
     try {
-      frame.a = buildArmPayload(poseLandmarker.detectForVideo(video, now), handLandmarker.detectForVideo(video, now), settings.mirror);
+      frame.a = buildArmPayload(poseLandmarker.detectForVideo(video, now), handLandmarker.detectForVideo(video, now), settings.mirror, armTracker, now);
     } catch (err) { console.warn('arm tracking', err); }
+    if (frame.h && !frame.a) frame.a = lastArms; // out of frame: keep the arms where they were too
+    if (frame.f && !frame.h && frame.a) lastArms = frame.a;
   }
   stage.setMotion(frame);
-  if (frame.f !== lastFace) { lastFace = frame.f; setTrack(frame.f ? 'ok' : 'warn', frame.f ? 'Tracking' : 'No face detected'); }
+  const state = frame.h ? 'hold' : frame.f;
+  if (state !== lastFace) {
+    lastFace = state;
+    if (state === 'hold') setTrack('warn', 'Out of view — holding your last pose');
+    else setTrack(frame.f ? 'ok' : 'warn', frame.f ? 'Tracking' : 'No face detected');
+  }
 
   sendFrame(frame, now);
 }
@@ -1175,7 +1325,7 @@ async function setPaused(on) {
     video.srcObject = null;
     setTrack('warn', 'Tracking paused');
   } else {
-    filters.head.reset(); filters.face.reset(); prevQ = null; lastFace = null;
+    filters.head.reset(); filters.face.reset(); prevQ = null; lastFace = null; lastGood = null; holding = false; lastArms = null; armTracker.reset();
     const ok = await openCamera();
     // the tracking loop may already have found your face while the camera was starting —
     // only show "looking" if it hasn't (it updates the status itself as soon as it does)

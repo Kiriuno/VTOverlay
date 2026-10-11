@@ -58,6 +58,8 @@ export class AvatarStage {
     this.cur = { q: new THREE.Quaternion(), p: new THREE.Vector3(), b: new Float32Array(ARKIT.length), xw: {}, arms: { l: newArmState(), r: newArmState() } };
 
     this.lookTarget = new THREE.Object3D();
+    this.springJoints = []; this.jointByBone = new Map();
+    this.grabs = new Map(); // key → { j, p (avatar-local target), at, remote }
     this.props = new PropLayer(this);
     this._resize();
     new ResizeObserver(() => this._resize()).observe(canvas);
@@ -183,6 +185,11 @@ export class AvatarStage {
     const head = vrm.humanoid.getNormalizedBoneNode('head');
     if (head && vrm.lookAt) { head.add(this.lookTarget); vrm.lookAt.target = this.lookTarget; }
 
+    // spring bones (hair, skirt, ribbons…) that can be grabbed with the mouse
+    this.springJoints = vrm.springBoneManager ? [...vrm.springBoneManager.joints] : [];
+    this.jointByBone = new Map(this.springJoints.map((j) => [j.bone, j]));
+    this.grabs.clear();
+
     vrm.update(0);
     this.props.captureRest(vrm);
     this._frameCamera();
@@ -205,6 +212,7 @@ export class AvatarStage {
     if (frame.b) for (let i = 0; i < ARKIT.length; i++) this.target.b[i] = frame.b[i] ?? 0;
     this.target.x = frame.x ?? null;
     this.target.face = frame.f !== false;
+    this.target.hold = !!frame.h; // broadcaster out of view: their last pose, held
     this.target.ae = frame.ae !== false;
     this.target.arms = frame.a ?? null;
     this.lastFrameAt = performance.now();
@@ -274,13 +282,13 @@ export class AvatarStage {
     // ----- face -----
     const em = vrm.expressionManager;
     if (em) {
-      const idleBlink = live ? 0 : this._idleBlink(t);
+      const idleBlink = live && !tgt.hold ? 0 : this._idleBlink(t);
       const smile = (B('mouthSmileLeft') + B('mouthSmileRight')) / 2;
       const vg = this.style.vg;
       if (this.perfectSync) {
         // per-vowel sensitivity, mapped onto the ARKit shapes that mostly form each vowel
         for (let i = 0; i < ARKIT.length; i++) if (this.syncMap[i]) em.setValue(this.syncMap[i], clamp01(cur.b[i] * (SYNC_VOWEL[i] ? vg[SYNC_VOWEL[i]] : 1)));
-        if (!live) { em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkLeft] ?? 'blinkLeft', idleBlink); em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkRight] ?? 'blinkRight', idleBlink); }
+        if (!live || tgt.hold) { em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkLeft] ?? 'blinkLeft', idleBlink); em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkRight] ?? 'blinkRight', idleBlink); }
       } else {
         const jaw = B('jawOpen'), pucker = B('mouthPucker'), funnel = B('mouthFunnel');
         const stretch = (B('mouthStretchLeft') + B('mouthStretchRight')) / 2;
@@ -314,7 +322,88 @@ export class AvatarStage {
       }
     }
 
+    const restore = this._applyGrabs();
     vrm.update(dt);
+    if (restore) for (const [jt, st] of restore) Object.assign(jt.settings, st);
+  }
+
+  // ---------------- grabbing spring bones (hair, clothes…) ----------------
+  // A grab pulls one spring joint's tail toward a point (in avatar-local space, so it means the same
+  // thing on every computer); a few parent joints follow partly, so a lock of hair bends naturally.
+  // Physics keeps running for everything else, and the hair swings back when released.
+  _jointTailWorld(j, out = new THREE.Vector3()) {
+    return out.copy(j._currentTail).applyMatrix4(j._getMatrixCenterToWorld());
+  }
+
+  /** Spring joint whose tail is nearest the canvas point (CSS px), within maxPx; -1 if none. */
+  pickJoint(x, y, maxPx = 26) {
+    if (!this.vrm || !this.springJoints.length) return -1;
+    const w = this.canvas.clientWidth, h = this.canvas.clientHeight, v = new THREE.Vector3();
+    // Hair behind the head projects onto the face too: prefer joints in front of the head's centre
+    // (as seen from the camera); ones behind only win when nothing in front is near the cursor.
+    const head = this.vrm.humanoid.getNormalizedBoneNode('head');
+    const viewDepth = (p) => -p.clone().applyMatrix4(this.camera.matrixWorldInverse).z;
+    const headDepth = head ? viewDepth(head.getWorldPosition(new THREE.Vector3())) : Infinity;
+    const r2 = maxPx * maxPx;
+    let best = -1, bestScore = Infinity;
+    this.springJoints.forEach((j, i) => {
+      this._jointTailWorld(j, v);
+      const behind = viewDepth(v) > headDepth + 0.02;
+      v.project(this.camera);
+      if (v.z > 1 || v.z < -1) return;
+      const dx = (v.x + 1) / 2 * w - x, dy = (1 - v.y) / 2 * h - y, d = dx * dx + dy * dy;
+      if (d > r2) return;
+      const score = d + (behind ? r2 : 0);
+      if (score < bestScore) { bestScore = score; best = i; }
+    });
+    return best;
+  }
+
+  /** Avatar-local point under canvas point (x, y) on the camera-facing plane through `world`. */
+  canvasToAvatar(x, y, world) {
+    const ndc = new THREE.Vector2(x / this.canvas.clientWidth * 2 - 1, -(y / this.canvas.clientHeight) * 2 + 1);
+    const ray = new THREE.Raycaster(); ray.setFromCamera(ndc, this.camera);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.camera.getWorldDirection(new THREE.Vector3()), world);
+    const hit = ray.ray.intersectPlane(plane, new THREE.Vector3());
+    return hit ? this.vrm.scene.worldToLocal(hit) : null;
+  }
+
+  jointWorld(i) { const j = this.springJoints[i]; return j ? this._jointTailWorld(j) : null; }
+
+  /** Start / move (p = [x,y,z] avatar-local) or release (p = null) a grab. */
+  setGrab(key, j, p, remote = false) {
+    if (p == null || !(j >= 0) || !this.springJoints[j]) { this.grabs.delete(key); return; }
+    this.grabs.set(key, { j, p: new THREE.Vector3().fromArray(p), at: performance.now(), remote });
+  }
+
+  clearGrabs(filter = () => true) { for (const k of [...this.grabs.keys()]) if (filter(k)) this.grabs.delete(k); }
+
+  _applyGrabs() {
+    if (!this.grabs.size) return;
+    const now = performance.now(), weights = [1, 0.6, 0.35, 0.15];
+    const target = new THREE.Vector3(), head = new THREE.Vector3(), desired = new THREE.Vector3();
+    const restore = new Map(); // joint → its own physics settings, put back right after this update
+    this.vrm.scene.updateMatrixWorld(true);
+    for (const [key, g] of this.grabs) {
+      if (g.remote && now - g.at > 3000) { this.grabs.delete(key); continue; } // lost release message
+      target.copy(g.p);
+      this.vrm.scene.localToWorld(target);
+      let jt = this.springJoints[g.j];
+      for (let k = 0; k < weights.length && jt; k++) {
+        head.setFromMatrixPosition(jt.bone.matrixWorld);
+        const len = jt._worldSpaceBoneLength || this._jointTailWorld(jt, desired).distanceTo(head);
+        desired.copy(target).sub(head).normalize().multiplyScalar(len).add(head).applyMatrix4(jt._getMatrixWorldToCenter());
+        jt._currentTail.lerp(desired, weights[k]);
+        jt._prevTail.lerp(desired, weights[k]);
+        // stiffness (pull back to rest) and gravity would fight the hand: ease them off while held
+        if (!restore.has(jt)) restore.set(jt, { stiffness: jt.settings.stiffness, gravityPower: jt.settings.gravityPower });
+        const keep = 1 - weights[k];
+        jt.settings.stiffness = restore.get(jt).stiffness * keep;
+        jt.settings.gravityPower = restore.get(jt).gravityPower * keep;
+        jt = this.jointByBone.get(jt.bone.parent);
+      }
+    }
+    return restore.size ? restore : null;
   }
 
   // ---------------- arms & hands ----------------

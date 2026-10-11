@@ -75,7 +75,7 @@ below (head rotation, head offset, 52 face-shape weights, expression name and â€
 
 Messages
   motion channel (unreliable, json, ~30 Hz):
-    { t:'m', q:[x,y,z,w], p:[x,y,z], b:[52 numbers 0..1], x:'happy'|null, f:boolean (face found),
+    { t:'m', q:[x,y,z,w], p:[x,y,z], b:[52 numbers 0..1], x:'happy'|null, f:boolean (face found), h:true (held: out of view, last pose),
       ae:boolean (auto expressions), a:{l,r}|null (arm/hand directions, see arms.js) }
        q = head rotation (avatar space), p = head offset in metres from calibrated centre
   model channel (reliable, binary):
@@ -90,7 +90,12 @@ Messages
                            { t:'need-model' }   cache miss after 'model-use'
     broadcaster -> viewer  { t:'view', fr, zoom, px, py, yaw, el }
                            { t:'style', vg:{aa,ee,ih,oh,ou}, light:{color,i,az,el,amb,ambColor} }   (see normalizeStyle)
-                           { t:'pos', x, y, s }   (only used in 'screen' mode)
+                           { t:'pos', x, y, s, tb }   (only used in 'screen' mode; tb = may cover the taskbar)
+                           { t:'perm', grab:boolean }   may this viewer pull hair / clothes?
+                           { t:'grab', k, j, p }        someone's pull (k = 'b' broadcaster | 'v<n>' viewer; j = spring joint index,
+                                                         p = avatar-local target [x,y,z], j:-1 / p:null = let go)
+    viewer -> broadcaster  { t:'grab', j, p }           this viewer's pull (ignored unless allowed; relayed to the others)
+                           { t:'rx', s:'waiting'|'loading'|'ready'|'hidden'|'error', p }   what the viewer sees (p = loading progress)
     both ways              { t:'hb' } heartbeat Â· { t:'bye', reason:'ended'|'kicked'|'left'|'full', max? } clean disconnect / room full
 
   props (model channel):

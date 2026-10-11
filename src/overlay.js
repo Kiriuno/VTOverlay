@@ -1,6 +1,7 @@
 // Receiver: shows a friend's avatar as a floating widget, in a window, or over a whole monitor.
 // How the avatar is framed (bust/full, zoom, position, rotation) is controlled by the broadcaster.
 import { AvatarStage } from './shared/avatar.js';
+import { SpringGrabber } from './shared/grab.js';
 import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, IDLE_HIDE_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
@@ -21,6 +22,7 @@ const stage = new AvatarStage($('stage'), MODE === 'window' ? { maxPixelRatio: 2
 if (MODE === 'screen') $('anchor').appendChild($('status'));
 stage.setView(store.get('vt-view', {})); // last view from the broadcaster until a fresh one arrives
 stage.setStyle(store.get('vt-style', {})); // same for lighting / mouth shapes
+window.vtStage = stage; // handy from the dev tools (and for tests)
 
 // ---------------- status pill ----------------
 let hasModel = false, statusTimer = null;
@@ -35,6 +37,17 @@ function status(state, text, { autoHide = false, retry = false } = {}) {
 }
 $('retryBtn').onclick = () => reconnectNow();
 
+// ---------------- tell the broadcaster what we see ----------------
+let rxState = { s: 'waiting', p: 0 }, rxSentAt = 0;
+function reportRx(s, p = 0) {
+  const changed = s !== rxState.s;
+  rxState = { s, p };
+  // progress updates at most ~4 times a second; state changes right away
+  if (!changed && performance.now() - rxSentAt < 250) return;
+  sendRx();
+}
+function sendRx() { rxSentAt = performance.now(); try { if (model?.open) model.send({ t: 'rx', ...rxState }); } catch {} }
+
 // ---------------- full screen: hide the avatar while the broadcaster isn't tracking ----------------
 // Paused, face out of view or connection lost for IDLE_HIDE_MS → fade the avatar (and its status
 // pill) out and stop rendering; it fades back in on the first live tracking frame.
@@ -43,6 +56,7 @@ function setIdleHidden(on) {
   if (on === idleHidden) return;
   idleHidden = on;
   document.body.classList.toggle('idle', on);
+  if (hasModel) reportRx(on ? 'hidden' : 'ready');
   if (on) setTimeout(() => { if (idleHidden) stage.suspended = true; }, 900); // after the fade
   else stage.suspended = false;
   if (on) window.vt.reportStatus('warn', 'Avatar hidden — the broadcaster isn\'t tracking');
@@ -88,6 +102,7 @@ if (MODE === 'floating') {
   let drag = null;
   window.addEventListener('mousedown', (e) => {
     if (locked || e.button !== 0 || e.target.closest('button')) return;
+    if (grabber.grabbing || grabber.over(e) >= 0) return; // pulling hair, not moving the widget
     drag = { x: e.screenX, y: e.screenY };
     document.body.classList.add('dragging');
   });
@@ -104,6 +119,42 @@ if (MODE === 'floating') {
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !locked) window.vt.setLocked(true); });
 }
 
+// ---------------- pulling hair / clothes (only if the broadcaster allows it) ----------------
+let grabAllowed = false;
+const grabber = new SpringGrabber(stage, $('stage'), {
+  send: (j, p) => { try { if (model?.open) model.send({ t: 'grab', j, p }); } catch {} },
+  canGrab: () => grabAllowed && hasModel && !idleHidden && !document.body.classList.contains('zoning'),
+});
+// Full screen and a locked widget are click-through: they only take the mouse while it's over
+// something grabbable (and while a pull is going on), then hand it straight back to the desktop.
+let capturing = false;
+const clickThrough = () => MODE === 'screen' || (MODE === 'floating' && locked);
+function setCapture(on) {
+  if (on === capturing) return;
+  capturing = on;
+  window.vt.captureMouse(on);
+}
+function updateHover(e) {
+  const over = grabber.grabbing || grabber.over(e) >= 0;
+  document.body.style.cursor = grabber.grabbing ? 'grabbing' : over ? 'grab' : '';
+  if (clickThrough()) setCapture(over);
+}
+addEventListener('mousemove', (e) => {
+  if (grabber.grabbing) grabber.move(e);
+  updateHover(e);
+});
+addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || e.target.closest('button, #zoneEditor')) return;
+  if (grabber.begin(e)) { e.preventDefault(); updateHover(e); }
+});
+addEventListener('mouseup', (e) => { if (grabber.grabbing) { grabber.end(); updateHover(e); } });
+addEventListener('blur', () => { if (grabber.grabbing) grabber.end(); });
+document.addEventListener('mouseleave', () => { if (!grabber.grabbing) { document.body.style.cursor = ''; if (clickThrough()) setCapture(false); } });
+function setGrabAllowed(on) {
+  grabAllowed = on;
+  if (!on) { grabber.end(); stage.clearGrabs(); document.body.style.cursor = ''; if (clickThrough()) setCapture(false); }
+}
+
 // ---------------- screen: zone + remote placement ----------------
 const FULL_ZONE = { x: 0, y: 0, w: 1, h: 1 };
 let zone = store.get('vt-zone', FULL_ZONE);
@@ -111,7 +162,10 @@ let pos = { ...DEFAULT_POS, ...store.get('vt-pos', {}) };
 const shown = { ...pos }; // smoothed
 
 let work = { x: 0, y: 0, w: 1, h: 1 }; // monitor minus the taskbar (filled in below)
-function zonePx(z = effectiveZone(zone, work)) {
+// the area the avatar may use: the zone minus the taskbar — or the whole zone when the broadcaster
+// lets it go over the taskbar (pos.tb; handy when we're watching something full screen)
+const usableZone = (p = pos) => effectiveZone(zone, p.tb ? FULL_ZONE : work);
+function zonePx(z = usableZone()) {
   const W = innerWidth, H = innerHeight;
   return { x: z.x * W, y: z.y * H, w: z.w * W, h: z.h * H };
 }
@@ -150,7 +204,8 @@ function animatePlacement() {
 }
 
 function applyPos(p) {
-  pos = clampPos({ ...pos, ...p }, zonePx());
+  const next = { ...pos, ...p };
+  pos = clampPos(next, zonePx(usableZone(next)));
   store.set('vt-pos', pos);
 }
 
@@ -253,11 +308,13 @@ async function showModel(buf, id) {
   try {
     await stage.loadVRM(buf, id);
     hasModel = true;
+    reportRx(idleHidden ? 'hidden' : 'ready');
     lastLiveAt = performance.now(); // give tracking a full grace period after (re)loading
     status('ok', 'Connected', { autoHide: true });
     return true;
   } catch (err) {
     status('bad', 'Could not load avatar: ' + err.message);
+    reportRx('error');
     return false;
   }
 }
@@ -349,6 +406,7 @@ function openChannels() {
     if (!live()) return;
     lastHeard = performance.now();
     sendViewerState();
+    sendRx();
     for (const hash of propWaiters.keys()) requestProp(hash); // anything still missing after a reconnect
     if (sharing) callWithScreen();
     clearInterval(hbTimer);
@@ -370,7 +428,7 @@ function openChannels() {
       lastSeq = d.n;
     }
     stage.setMotion(d);
-    if (d.f) markLive();
+    if (d.f && !d.h) markLive(); // a held pose (broadcaster out of view) isn't live tracking
   });
   const lost = () => {
     if (!live()) return;
@@ -384,6 +442,7 @@ function openChannels() {
 /** Close the current channels; any events they still fire are ignored. */
 function closeChannels() {
   gen++;
+  setGrabAllowed(false);
   clearInterval(hbTimer);
   const a = model, b = motion;
   model = motion = null;
@@ -457,6 +516,7 @@ async function onModelData(d) {
       closeChannels();
       stage.clearVRM(); hasModel = false;
       stage.props.sync([]);
+      rxState = { s: 'waiting', p: 0 };
       if (d.reason === 'kicked') { stopped = true; teardown(); status('bad', 'The broadcaster disconnected you.', { retry: true }); }
       else if (d.reason === 'full') {
         roomFullUntil = performance.now() + 10000;
@@ -472,6 +532,12 @@ async function onModelData(d) {
     }
     case 'style':
       store.set('vt-style', stage.setStyle(d));
+      return;
+    case 'perm':
+      setGrabAllowed(!!d.grab);
+      return;
+    case 'grab': // someone else (broadcaster or another viewer) pulling hair / clothes
+      if (typeof d.k === 'string' && d.k !== 'me') stage.setGrab(d.k, Number.isInteger(d.j) ? d.j : -1, Array.isArray(d.p) ? d.p.slice(0, 3).map(Number) : null, true);
       return;
     case 'props':
       if (Array.isArray(d.list)) stage.props.sync(d.list.slice(0, 64));
@@ -495,12 +561,12 @@ async function onModelData(d) {
       return;
     }
     case 'pos':
-      if (MODE === 'screen') applyPos({ x: +d.x, y: +d.y, s: +d.s });
+      if (MODE === 'screen') { applyPos({ x: +d.x, y: +d.y, s: +d.s, tb: !!d.tb }); layoutBox(); }
       return;
     case 'model-use': {
       if (stage.modelId === d.id) return;
       const rec = await cacheGet();
-      if (rec?.id === d.id && rec.buf) { await showModel(rec.buf, rec.id); return; }
+      if (rec?.id === d.id && rec.buf) { reportRx('loading', 1); await showModel(rec.buf, rec.id); return; }
       model?.send({ t: 'need-model' });
       return;
     }
@@ -508,11 +574,13 @@ async function onModelData(d) {
       incoming = { id: d.id, size: d.size, chunks: d.chunks, parts: new Array(d.chunks), got: 0 };
       $('bar').hidden = false;
       status('warn', 'Receiving avatar…');
+      reportRx('loading', 0);
       return;
     case 'model-chunk':
       if (!incoming || d.id !== incoming.id) return;
       if (!incoming.parts[d.i]) { incoming.parts[d.i] = toBuffer(d.data); incoming.got++; }
       $('bar').firstElementChild.style.width = (100 * incoming.got / incoming.chunks).toFixed(1) + '%';
+      reportRx('loading', incoming.got / incoming.chunks * 0.95); // the last bit is opening the model
       return;
     case 'model-end': {
       if (!incoming || d.id !== incoming.id) return;

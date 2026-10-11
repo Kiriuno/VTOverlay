@@ -55,6 +55,7 @@
   #zoneBox { position: absolute; outline: 1px dashed #b48cffaa; }
   #screenBox .taskbar { position: absolute; background: repeating-linear-gradient(45deg, #ffffff14 0 6px, #ffffff08 6px 12px), #000a;
     color: var(--muted); font-size: 10px; display: grid; place-items: center; pointer-events: none; text-transform: uppercase; letter-spacing: .1em; overflow: hidden; }
+  #screenBox.overTb .taskbar { opacity: .45; }
   #avBox { position: absolute; border: 2px solid var(--accent); background: #b48cff2a; border-radius: 6px; cursor: grab; touch-action: none;
            display: flex; align-items: flex-end; justify-content: center; }
   #avBox.dragging { cursor: grabbing; }
@@ -64,6 +65,8 @@
   #avHandle { position: absolute; right: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: nesw-resize; }
   #placeMsg { margin: auto; max-width: 420px; text-align: center; line-height: 1.5; }
   #viewers .vrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  #viewers .vsee { font-size: 11px; }
+  #viewers .vsee.ok { color: var(--ok); } #viewers .vsee.warn { color: var(--warn); } #viewers .vsee.bad { color: var(--bad); } #viewers .vsee.muted { color: var(--muted); }
   #viewers .vrow button { padding: 1px 8px; font-size: 12px; }
   #viewTools { position: absolute; top: 14px; right: 14px; display: flex; gap: 6px; align-items: center; z-index: 3; }
   #viewTools button { padding: 6px 10px; font-size: 13px; background: #0008; }
@@ -118,13 +121,14 @@
     <video id="cam" playsinline muted></video>
     <div id="guide"><span>what viewers see (widget / full screen)</span></div>
     <div id="viewTools"><button id="frBtn">Bust</button><button id="resetView">Reset view</button></div>
-    <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: rotate<br>Viewers see exactly this framing</div>
+    <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: rotate · Left-drag hair / clothes: pull<br>Viewers see exactly this framing</div>
     <div id="pausedBanner" hidden><b>⏸ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling<br>(full-screen viewers hide it after 30 s)</div></div>
     <div id="tabs"><button data-tab="avatar" class="on">My avatar</button><button data-tab="place">Place on viewer's screen</button></div>
     <div id="placeView" hidden>
       <div id="placeBar">
         <select id="viewerSel"></select>
         <button id="resetPos">Reset position</button>
+        <label class="toggle" id="overTaskbarRow" title="Lets you put the avatar all the way at the bottom of their screen — for when they watch something full screen and the taskbar is hidden" style="gap:6px;padding:0">Can go over the taskbar <input type="checkbox" id="overTaskbar"></label>
         <span class="muted hint">Drag the avatar to move it · scroll or drag the dot to resize</span>
       </div>
       <div id="screenArea">
@@ -174,6 +178,7 @@
       <label class="toggle">Auto expressions from your face <input type="checkbox" id="autoExpr"></label>
       <label class="toggle">Track arms &amp; hands <span class="badge" style="margin-left:6px">beta</span><input type="checkbox" id="arms" style="margin-left:auto"></label>
       <div class="hint muted" id="armsHint" hidden>Keep your shoulders and hands in the camera view. Uses more CPU/GPU.</div>
+      <div class="slider" id="armSmoothRow" hidden title="Higher = steadier arms and fingers, a little more delay"><span>Arm &amp; hand smoothing</span><input type="range" id="armSmoothing" min="0" max="1" step="0.05" value="0.6"></div>
       <label class="toggle">Mirror (move like a reflection) <input type="checkbox" id="mirror" checked></label>
       <label class="toggle">Swap left/right eyes &amp; mouth <input type="checkbox" id="swapLR" checked></label>
       <label class="toggle">Link both eyes (no winks) <input type="checkbox" id="linkEyes"></label>
@@ -217,7 +222,7 @@
 
     <div class="sec">
       <h3>Props</h3>
-      <div class="row" style="margin-bottom:8px"><button id="addProp">Add image…</button><input type="file" id="propFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
+      <div class="row" style="margin-bottom:8px"><button id="addProp">Add image…</button><button id="lockAll" title="Stop props from being grabbed, resized or rotated in the preview"></button><input type="file" id="propFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
       <div id="propList"></div>
       <div id="propDrop" class="muted">PNG, JPG, GIF or WebP (animated works). Drop images here or anywhere on the window.<br>
         In the preview: <b>drag</b> a prop to move it · <b>scroll</b> on it to resize · <b>Shift+scroll</b> to rotate.</div>
@@ -225,6 +230,7 @@
 
     <div class="sec">
       <h3>Viewers <span id="viewerCount" style="text-transform:none;letter-spacing:0"></span></h3>
+      <label class="toggle" title="Viewers can pull your avatar's hair, clothes, ribbons… with their mouse. Everyone sees it.">Let viewers grab hair &amp; clothes <input type="checkbox" id="viewerGrab"></label>
       <div id="viewers" class="muted">Nobody yet — share the code.</div>
     </div>
   </aside>

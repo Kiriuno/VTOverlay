@@ -208,8 +208,9 @@ export class PropLayer {
     this.selectedId = id;
   }
 
-  pick(raycaster) {
-    const meshes = [...this.items.values()].filter((it) => it.mesh.visible && it.mesh.parent).map((it) => it.mesh);
+  /** @param filter optional (def) => boolean, e.g. to skip locked props */
+  pick(raycaster, filter = null) {
+    const meshes = [...this.items.values()].filter((it) => it.mesh.visible && it.mesh.parent && (!filter || filter(it.def))).map((it) => it.mesh);
     const hit = raycaster.intersectObjects(meshes, false)[0];
     return hit ? { id: hit.object.userData.propId, point: hit.point } : null;
   }
