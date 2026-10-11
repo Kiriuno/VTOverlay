@@ -76,6 +76,7 @@ Its ✕ hides it to the tray (the ^ next to the clock). Click the tray icon to b
 ## Troubleshooting
 
 - **Viewer stuck on "Room isn't online":** check the code. The broadcaster must have **Start broadcasting** open.
+- **Stuck on "Can't reach the connection server":** the free PeerJS server (0.peerjs.com) that helps the two apps find each other is busy or down. The app keeps retrying by itself. Your room code stays the same, and viewers who are already connected keep watching. If it happens often, see *Your own signalling server* below.
 - **Can't connect at all:** some networks block direct connections (phone hotspots, campus or work Wi-Fi, CGNAT). Those need a TURN relay; see *Advanced* below.
 - **Wrong eye winks:** toggle **Swap left/right eyes & mouth**.
 - **Hotkey shows red:** another app already uses that combination; pick another.

@@ -333,6 +333,18 @@ let gen = 0;           // channel generation
 let failures = 0;      // consecutive failed attempts → backoff
 let sigFailures = 0;   // consecutive failed signalling reconnects
 const target = PEER_PREFIX + code;
+// Watchdog: a signalling server that accepts the connection but never answers would leave us
+// "Connecting…" forever — if we're not registered in time, throw the Peer away and start over.
+let peerAttemptAt = 0, peerHangs = 0;
+setInterval(() => {
+  if (stopped || !peer || peer.open || model?.open || !peerAttemptAt) return;
+  if (performance.now() - peerAttemptAt < Math.min(30000, 10000 + peerHangs * 5000)) return;
+  peerHangs++;
+  status('bad', `Can't reach the connection server — retrying (attempt ${peerHangs + 1})…`);
+  const p = peer; peer = null;
+  try { p.destroy(); } catch {}
+  ensurePeer();
+}, 2000);
 const backoff = () => Math.min(15000, 1500 * 2 ** Math.max(0, Math.min(failures - 1, 4))); // 1.5 s, 3 s, 6 s, 12 s, 15 s…
 
 function connect() {
@@ -350,9 +362,10 @@ function ensurePeer() {
     return; // still registering: 'open' will follow
   }
   const p = peer = new window.Peer(peerOptions());
+  peerAttemptAt = performance.now();
   p.on('open', () => {
     if (p !== peer) return;
-    sigFailures = 0;
+    sigFailures = 0; peerHangs = 0; peerAttemptAt = 0;
     if (!model && !stopped) openChannels(); // a signalling reconnect must not touch working channels
   });
   p.on('error', (err) => {
@@ -381,6 +394,7 @@ function reconnectSignalling() {
   clearTimeout(sigTimer);
   const p = peer;
   if (stopped || !p || p.destroyed || !p.disconnected) return;
+  peerAttemptAt = performance.now();
   if (++sigFailures > 4 && !model?.open) { // our id seems stuck on the server: start over with a fresh one
     sigFailures = 0;
     peer = null;

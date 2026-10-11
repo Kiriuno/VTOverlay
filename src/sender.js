@@ -371,12 +371,38 @@ const savedCode = () => { try { return localStorage.getItem('vt-code'); } catch 
 function setNet(state, text) { $('netDot').className = 'dot ' + state; $('netText').textContent = text; }
 
 let sigTimer = null, sigFailures = 0, idTakenTries = 0;
+// Watchdog: an overloaded signalling server can accept the connection and then never answer, which
+// used to leave "Connecting…" on screen forever. If we're not registered within a while, start over.
+let sigAttemptAt = 0, sigHangs = 0, currentCode = null;
+const SIG_TIMEOUT_MS = () => Math.min(30000, 10000 + sigHangs * 5000); // 10 s, 15 s, 20 s … 30 s
+setInterval(() => {
+  const p = peer;
+  if (!p || stopping || p.open || !sigAttemptAt || performance.now() - sigAttemptAt < SIG_TIMEOUT_MS()) return;
+  sigHangs++;
+  const msg = `Can't reach the connection server — retrying (attempt ${sigHangs + 1})…` + (sigHangs >= 3 ? ' Check your internet connection / firewall.' : '');
+  if (!p.destroyed && viewers.size) {
+    // viewers are connected directly: keep them, just redo the signalling registration
+    sigAttemptAt = performance.now();
+    try { p.disconnect(); } catch {}
+    try { p.reconnect(); } catch {}
+  } else {
+    peer = null; // first, so the dying Peer's own 'disconnected' event is ignored
+    try { p.destroy(); } catch {}
+    startPeer(currentCode);
+  }
+  setNet('bad', msg);
+}, 2000);
+
 function startPeer(code = savedCode() || randomCode()) {
   clearTimeout(sigTimer);
+  currentCode = code;
+  sigAttemptAt = performance.now();
+  // the code is known before the server confirms it (it's saved from last time): show it right away
+  $('code').textContent = code;
   const p = peer = new window.Peer(PEER_PREFIX + code, peerOptions());
   p.on('open', () => {
     if (p !== peer) return;
-    sigFailures = 0; idTakenTries = 0;
+    sigFailures = 0; idTakenTries = 0; sigHangs = 0; sigAttemptAt = 0;
     try { localStorage.setItem('vt-code', code); } catch {}
     $('code').textContent = code;
     updateViewers();
@@ -434,7 +460,7 @@ function startPeer(code = savedCode() || randomCode()) {
     sigTimer = setTimeout(() => {
       if (p !== peer || stopping) return;
       if (p.destroyed) startPeer(code);            // never registered: start over, same code
-      else if (p.disconnected) { try { p.reconnect(); } catch {} }
+      else if (p.disconnected) { sigAttemptAt = performance.now(); try { p.reconnect(); } catch {} }
     }, delay);
   };
   p.on('disconnected', () => {
