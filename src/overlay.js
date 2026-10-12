@@ -229,25 +229,28 @@ function clampPos(p, zp) {
   return { ...p, s, x: Math.max(halfW, Math.min(1 - halfW, p.x)), y: Math.max(Math.min(1, boxH / zp.h), Math.min(1, p.y)) };
 }
 
-// The avatar is framed inside a virtual box at the broadcaster's position. The canvas covers that box
-// plus generous margins (arms, hair, zoomed-in framing still fit, nothing is cut at the box edge),
-// clipped to the zone. Covering the whole monitor would make Windows copy a full-screen see-through
-// layer every frame, which is what made the avatar laggy.
-// The drawing area is the avatar's box plus generous margins (zoomed-in framing, long hair, arms, the
-// legs below a bust shot, a sideways roll… all fit) and is never cut by the zone or the screen edge,
-// it may simply hang off the screen. Its size depends only on the avatar's size, so while the
-// broadcaster drags the avatar around it just slides (no resize = no flicker). Big avatars render at a
-// lower resolution instead of costing more (pixel budget).
+// The avatar is framed inside a virtual box at the broadcaster's position. The drawing area is that box
+// plus generous margins (zoomed-in framing, long hair, arms, the legs below a bust shot, a sideways
+// roll… all fit), clipped to the window so no pixels are spent off-screen and the avatar always renders
+// at full resolution. The size is rounded up to steps of 64 px, so while the broadcaster drags the
+// avatar around the canvas mostly just slides; when it does resize it redraws in the same frame, so
+// there's no flicker.
 const MARGIN = { side: 0.9, top: 0.6, bottom: 1.6 }; // × box height
-if (MODE === 'screen') stage.pixelBudget = 2.2e6;
+const STEP = 64;
 function layoutBox() {
   const zp = zonePx();
   const p = clampPos(shown, zp);
   const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
   const left = zp.x + p.x * zp.w - boxW / 2, top = zp.y + p.y * zp.h - boxH;
-  const mS = Math.round(boxH * MARGIN.side), mT = Math.round(boxH * MARGIN.top), mB = Math.round(boxH * MARGIN.bottom);
-  const w = Math.round(boxW) + 2 * mS, h = Math.round(boxH) + mT + mB;
-  const rx = left - mS, ry = top - mT;
+  const mS = boxH * MARGIN.side, mT = boxH * MARGIN.top, mB = boxH * MARGIN.bottom;
+  const W = innerWidth, H = innerHeight;
+  // wanted area, clipped to the window
+  const x0 = Math.max(0, Math.floor(left - mS)), y0 = Math.max(0, Math.floor(top - mT));
+  const x1 = Math.min(W, Math.ceil(left + boxW + mS)), y1 = Math.min(H, Math.ceil(top + boxH + mB));
+  // round the size up (never past the window), then keep it on screen
+  const w = Math.min(W, Math.max(STEP, Math.ceil((x1 - x0) / STEP) * STEP));
+  const h = Math.min(H, Math.max(STEP, Math.ceil((y1 - y0) / STEP) * STEP));
+  const rx = Math.max(0, Math.min(x0, W - w)), ry = Math.max(0, Math.min(y0, H - h));
   const bs = $('box').style;
   const resized = bs.width !== w + 'px' || bs.height !== h + 'px';
   Object.assign(bs, { left: rx + 'px', top: ry + 'px', width: w + 'px', height: h + 'px' });

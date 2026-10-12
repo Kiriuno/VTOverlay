@@ -7,6 +7,7 @@ import { ARKIT, ARKIT_INDEX, DEFAULT_VIEW, DEFAULT_STYLE, normalizeStyle } from 
 import { FINGER_SEGMENTS } from './arms.js';
 import { PropLayer } from './props.js';
 import { AvatarFx } from './fx.js';
+import { measureLegs, poseValues, poseArms, POSE_KEYS } from './poses.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const SIDES = { l: 'left', r: 'right' };
@@ -61,6 +62,8 @@ export class AvatarStage {
     this.target = { q: new THREE.Quaternion(), p: new THREE.Vector3(), b: new Float32Array(ARKIT.length), x: null, face: false, ae: true, arms: null };
     this.cur = { q: new THREE.Quaternion(), p: new THREE.Vector3(), b: new Float32Array(ARKIT.length), xw: {}, arms: { l: newArmState(), r: newArmState() } };
 
+    this.poseW = { stand: 1 }; // body pose cross-fade weights
+    this.poseDrop = 0; this._framedDrop = 0; // how far the pose lowers the hips (bust framing follows it)
     this.lookTarget = new THREE.Object3D();
     this.springJoints = []; this.jointByBone = new Map();
     this.grabs = new Map(); // key → { j, p (avatar-local target), at, remote }
@@ -166,11 +169,12 @@ export class AvatarStage {
 
   _frameCamera() {
     let headY = 1.4, height = 1.6;
-    if (this.vrm) {
-      const head = this.vrm.humanoid.getNormalizedBoneNode('head');
-      if (head) { const v = new THREE.Vector3(); head.getWorldPosition(v); headY = v.y; height = headY + 0.12; }
-    }
+    if (this.vrm && this.headRestY != null) { headY = this.headRestY; height = headY + 0.12; }
     const { fr, zoom, px, py, el } = this.view;
+    // bust framing keeps the face in view when a pose (sitting…) lowers it; full body stays put, so
+    // sitting down looks like sitting down
+    if (fr !== 'full') headY -= this.poseDrop;
+    this._framedDrop = this.poseDrop;
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
     const span = fr === 'full' ? height * 1.08 : 0.64;
     this._span = span;
@@ -207,6 +211,7 @@ export class AvatarStage {
       : (vrm.meta?.metaVersion === '0' ? -1 : 1);
     this._prepareArmRig();
     this.hipsRest = vrm.humanoid.getNormalizedBoneNode('hips')?.position.clone() ?? null;
+    this.legs = measureLegs((n) => vrm.humanoid.getNormalizedBoneNode(n), this.hipsRest);
 
     // Detect "perfect sync" models (expressions named after ARKit blendshapes).
     const names = Object.keys(vrm.expressionManager?.expressionMap ?? {});
@@ -229,6 +234,8 @@ export class AvatarStage {
     this.grabs.clear();
 
     vrm.update(0);
+    const headNode = vrm.humanoid.getNormalizedBoneNode('head');
+    this.headRestY = headNode ? headNode.getWorldPosition(new THREE.Vector3()).y : null;
     this.props.captureRest(vrm);
     this.fx.captureRest(vrm);
     this._frameCamera();
@@ -254,6 +261,7 @@ export class AvatarStage {
     this.target.face = frame.f !== false;
     this.target.hold = !!frame.h; // broadcaster out of view: their last pose, held
     this.target.ae = frame.ae !== false;
+    this.target.ax = frame.ax; // [auto expression, strength] | null; undefined from older broadcasters
     this.target.arms = frame.a ?? null;
     this.lastFrameAt = performance.now();
   }
@@ -297,21 +305,32 @@ export class AvatarStage {
     if (head) head.quaternion.copy(ident).slerp(headQ, neck ? 0.55 : 0.9);
     // the whole body follows the head (up/down, left/right, toward/away, scaled by the broadcaster's
     // sensitivity sliders), with a slight lean so it doesn't look like a sliding cut-out; plus breathing
+    const P = this._pose(dt, t);
     const hips = hb('hips');
-    if (hips && this.hipsRest) hips.position.set(this.hipsRest.x + s * cur.p.x, this.hipsRest.y + cur.p.y, this.hipsRest.z + s * cur.p.z);
+    if (hips && this.hipsRest) {
+      hips.position.set(this.hipsRest.x + s * (cur.p.x + P.hx), this.hipsRest.y + cur.p.y + P.hy + P.bob, this.hipsRest.z + s * (cur.p.z + P.hz));
+      hips.rotation.set(s * P.hp, 0, -s * P.hr);
+    }
     const breathe = Math.sin(t * 1.6) * 0.012;
-    if (spine) spine.rotation.set(s * (-cur.p.z * 0.3 + breathe), 0, s * (-cur.p.x * 0.35));
+    if (spine) spine.rotation.set(s * (-cur.p.z * 0.3 + breathe + P.sp), 0, s * (-cur.p.x * 0.35) - s * P.sr);
+    for (const [side, sg] of [['l', 1], ['r', -1]]) {
+      const name = side === 'l' ? 'left' : 'right';
+      // XZY: turn the thigh around itself first, then out to the side, then forward
+      hb(name + 'UpperLeg')?.rotation.set(-s * P[side + 'F'], sg * P[side + 'T'], sg * s * P[side + 'O'], 'XZY');
+      hb(name + 'LowerLeg')?.rotation.set(s * P[side + 'K'], 0, 0);
+      hb(name + 'Foot')?.rotation.set(s * P[side + 'A'], 0, 0);
+    }
     if (chest) chest.rotation.set(s * breathe * 0.6, new THREE.Euler().setFromQuaternion(cur.q).y * 0.15, 0);
     // relaxed idle arms (the arm tracker blends from this pose)
     const sway = Math.sin(t * 0.9) * 0.03;
     const set = (n, x, y, z) => { const b = hb(n); if (b) b.rotation.set(x, y, z); };
-    set('leftUpperArm', 0, 0, s * (-1.22 + sway));
-    set('rightUpperArm', 0, 0, s * (1.22 - sway));
+    set('leftUpperArm', -s * P.laF, 0, s * (-1.22 + sway));
+    set('rightUpperArm', -s * P.raF, 0, s * (1.22 - sway));
     set('leftLowerArm', 0, -0.25, 0); // rotation about Y is the same in both frames
     set('rightLowerArm', 0, 0.25, 0);
     set('leftHand', 0, 0, -0.1 * s);
     set('rightHand', 0, 0, 0.1 * s);
-    for (const side of ['left', 'right']) for (const [bone] of FINGER_SEGMENTS) hb(side + bone)?.quaternion.identity();
+    this._idleFingers(t);
     this._applyArms(dt, live);
 
     // ----- eyes -----
@@ -342,29 +361,11 @@ export class AvatarStage {
         set('ee', stretch * 1.5 + smile * jaw * 1.2);
         set('ih', jaw * 0.6 * smile);
       }
-      // Auto expressions: read the emotion off the face-shape weights (no extra model needed). Each one
-      // combines several cues (one cue alone, like raised brows, is too common in normal talking), scaled by
-      // the broadcaster's sensitivity (style.ag); only the strongest shows, so they don't blur together.
-      const avg = (a, b) => (B(a) + B(b)) / 2, pos = (v) => Math.max(0, v);
-      const browInner = B('browInnerUp'), browOuter = avg('browOuterUpLeft', 'browOuterUpRight');
-      const browDown = avg('browDownLeft', 'browDownRight'), frown = avg('mouthFrownLeft', 'mouthFrownRight');
-      const wide = avg('eyeWideLeft', 'eyeWideRight'), squint = avg('eyeSquintLeft', 'eyeSquintRight');
-      const sneer = avg('noseSneerLeft', 'noseSneerRight'), press = avg('mouthPressLeft', 'mouthPressRight');
-      const cheek = avg('cheekSquintLeft', 'cheekSquintRight');
-      const notSmiling = 1 - clamp01(smile * 1.5);
-      const ag = this.style.ag;
-      const raw = {
-        happy: pos(smile - 0.22) * 1.8 + cheek * 0.3,
-        sad: (pos(frown - 0.03) * 3 + pos(browInner - browOuter - 0.05) * 1.8 + pos(B('mouthShrugLower') - 0.15) * 0.6) * notSmiling,
-        angry: (pos(browDown - 0.1) * 2.2 + sneer * 1.4 + pos(squint - 0.25) * 0.6 + press * 0.5) * notSmiling,
-        surprised: pos((browInner + browOuter) / 2 - 0.18) * 1.4 + pos(wide - 0.08) * 1.6 + pos(B('jawOpen') - 0.25) * 0.6,
-      };
-      const scores = {};
-      for (const k in raw) scores[k] = clamp01(raw[k] * (ag[k] ?? 1));
-      this.autoScores = scores; // for the broadcaster's meters
-      let top = null;
-      for (const k in scores) if (!top || scores[k] > scores[top]) top = k;
-      const auto = live && tgt.ae && top && scores[top] > 0.12 ? { [top]: scores[top], relaxed: 0 } : {};
+      // Auto expressions (see autoExpression below). A broadcaster on 0.8.1+ sends its own decision,
+      // made before its per-expression mouth / blink tuning, so everyone shows the same one.
+      let ax = tgt.ax;
+      if (ax === undefined) { const a = autoExpression(cur.b, this.style.ag); this.autoScores = a.scores; ax = a.top; }
+      const auto = live && tgt.ae && ax ? { [ax[0]]: ax[1], relaxed: 0 } : {};
       // perfect-sync models already show smiles etc. through their blendshapes, so keep auto subtle there
       const autoGain = this.perfectSync ? 0.35 : 0.75;
       // hotkey expressions fade in/out and override the auto ones
@@ -488,12 +489,25 @@ export class AvatarStage {
 
   _applyArms(dt, live) {
     if (!this.armRig) return;
-    const k = 1 - Math.exp(-dt * 14);
+    const k = 1 - Math.exp(-dt * 14), kGate = 1 - Math.exp(-dt * 6);
     const s = this.axis;
     const root = this.vrm.humanoid.normalizedHumanBonesRoot;
     this.vrm.scene.updateMatrixWorld(true);
     const rootInv = root.getWorldQuaternion(new THREE.Quaternion()).invert();
     const toH = (arr, o = 0) => new THREE.Vector3(s * arr[o], arr[o + 1], s * arr[o + 2]); // avatar → rig space
+    const parentRel = (node) => rootInv.clone().multiply(node.parent.getWorldQuaternion(new THREE.Quaternion()));
+    const aim = (node, rest, dirH, w) => {
+      const local = dirH.clone().applyQuaternion(parentRel(node).invert()).normalize();
+      const q = new THREE.Quaternion().setFromUnitVectors(rest, local);
+      node.quaternion.slerp(q, w);
+      node.updateMatrixWorld(true);
+    };
+    const aimHand = (rig, hf, hs, w) => {
+      const world = basisQuat(hf, hs).multiply(basisQuat(rig.handF, rig.handS).invert());
+      rig.hand.quaternion.slerp(parentRel(rig.hand).invert().multiply(world), w);
+      rig.hand.updateMatrixWorld(true);
+    };
+    const placed = this._poseArmPlacement(rootInv);
 
     for (const side of ['l', 'r']) {
       const rig = this.armRig[side], st = this.cur.arms[side];
@@ -501,6 +515,8 @@ export class AvatarStage {
       // smooth weights and directions
       st.w += ((t ? t.w : 0) - st.w) * k;
       st.hw += ((t && t.h ? t.hw * t.w : 0) - st.hw) * k;
+      // arms are only tracked while the camera sees the hand; otherwise they keep the pose's placement
+      st.hg += ((t && t.h ? 1 : 0) - st.hg) * kGate;
       if (t) {
         lerpDir(st.u, toH(t.u), k, st.init); lerpDir(st.f, toH(t.f), k, st.init);
         if (t.h) {
@@ -510,26 +526,139 @@ export class AvatarStage {
         }
         st.init = true;
       }
-      if (!rig || st.w < 0.01 || !st.init) continue;
-
-      const parentRel = (node) => rootInv.clone().multiply(node.parent.getWorldQuaternion(new THREE.Quaternion()));
-      const aim = (node, rest, dirH, w) => {
-        const local = dirH.clone().applyQuaternion(parentRel(node).invert()).normalize();
-        const q = new THREE.Quaternion().setFromUnitVectors(rest, local);
-        node.quaternion.slerp(q, w);
-        node.updateMatrixWorld(true);
-      };
-      aim(rig.upper, rig.upperRest, st.u, st.w);
-      aim(rig.lower, rig.lowerRest, st.f, st.w);
-
+      if (!rig) continue;
+      const pl = placed[side];
+      if (pl) {
+        aim(rig.upper, rig.upperRest, pl.u, pl.w);
+        aim(rig.lower, rig.lowerRest, pl.f, pl.w);
+        if (rig.handF) aimHand(rig, pl.hf, pl.hs, pl.w);
+      }
+      const aw = st.w * st.hg;
+      if (aw < 0.01 || !st.init) continue;
+      aim(rig.upper, rig.upperRest, st.u, aw);
+      aim(rig.lower, rig.lowerRest, st.f, aw);
       if (rig.handF && st.hw > 0.01 && st.hinit) {
-        const world = basisQuat(st.hf, st.hs).multiply(basisQuat(rig.handF, rig.handS).invert());
-        const q = parentRel(rig.hand).invert().multiply(world);
-        rig.hand.quaternion.slerp(q, st.hw);
-        rig.hand.updateMatrixWorld(true);
+        aimHand(rig, st.hf, st.hs, st.hw);
         for (const f of rig.fingers) aim(f.node, f.rest, st.g[f.i], st.hw);
       }
     }
+  }
+
+  /**
+   * Where the current pose puts each hand (on the hip, on the thighs…), as arm / hand directions in rig
+   * space plus a weight (how much of the current pose blend places that arm). Two-bone IK: the hand's
+   * wrist goes to a point measured on the model's own legs, the elbow bends outward and back.
+   */
+  _poseArmPlacement(rootInv) {
+    const out = { l: null, r: null };
+    const W = this.poseW, hb = (n) => this.vrm.humanoid.getNormalizedBoneNode(n);
+    let sum = 0;
+    for (const n in W) sum += W[n];
+    if (!sum || !this.legs) return out;
+    const wp = (n) => new THREE.Vector3().setFromMatrixPosition(n.matrixWorld);
+    const lHip = hb('leftUpperLeg'), rHip = hb('rightUpperLeg');
+    if (!lHip || !rHip) return out;
+    const up = new THREE.Vector3(0, 1, 0);
+    const leftward = wp(lHip).sub(wp(rHip)).normalize();
+    const fwd = new THREE.Vector3().crossVectors(leftward, up).normalize();
+    const size = this.legs.k * this.vrm.scene.scale.y;
+    for (const side of ['l', 'r']) {
+      const rig = this.armRig[side];
+      if (!rig) continue;
+      const L = side === 'l' ? 'left' : 'right';
+      const hip = hb(L + 'UpperLeg'), knee = hb(L + 'LowerLeg');
+      if (!hip || !knee) continue;
+      const S = wp(rig.upper), E0 = wp(rig.lower), H0 = wp(rig.hand);
+      const a = S.distanceTo(E0), b = E0.distanceTo(H0);
+      const HJ = wp(hip), K = wp(knee);
+      const outward = side === 'l' ? leftward.clone() : leftward.clone().negate();
+      const thighDir = K.clone().sub(HJ).normalize();
+      const acc = { u: new THREE.Vector3(), f: new THREE.Vector3(), hf: new THREE.Vector3(), hs: new THREE.Vector3() };
+      let w = 0;
+      for (const n in W) {
+        const kind = poseArms(n)[side];
+        if (!kind) continue;
+        let T, hf, hs, hint;
+        if (kind === 'hip') {
+          T = HJ.clone().addScaledVector(outward, 0.07 * size).addScaledVector(up, 0.1 * size).addScaledVector(fwd, -0.01 * size);
+          hf = fwd.clone().addScaledVector(up, -0.8).normalize();
+          hs = up.clone().addScaledVector(fwd, 0.3).normalize();
+          hint = outward.clone().addScaledVector(fwd, -0.6);
+        } else { // on the thigh ('thigh') or near the knee ('knee'), palm down, fingers toward the knee
+          // the top of the thigh: up when it's level (sitting), the front when it's upright (kneeling)
+          const top = up.clone().addScaledVector(fwd, 0.5);
+          top.addScaledVector(thighDir, -top.dot(thighDir)).normalize();
+          T = HJ.clone().lerp(K, kind === 'knee' ? 0.78 : 0.42).addScaledVector(top, 0.075 * size);
+          hf = thighDir.clone().addScaledVector(top, -0.15).normalize();
+          hs = outward.clone().negate();
+          hint = outward.clone().addScaledVector(fwd, -0.5).addScaledVector(up, -0.3);
+        }
+        const toT = T.clone().sub(S);
+        const d = Math.min(toT.length(), (a + b) * 0.999), dir = toT.normalize();
+        const cosA = Math.max(-1, Math.min(1, (a * a + d * d - b * b) / (2 * a * d)));
+        const perp = hint.clone().addScaledVector(dir, -hint.dot(dir)).normalize();
+        const E = S.clone().addScaledVector(dir, a * cosA).addScaledVector(perp, a * Math.sqrt(1 - cosA * cosA));
+        const H = S.clone().addScaledVector(dir, d);
+        const ww = W[n] / sum;
+        acc.u.addScaledVector(E.clone().sub(S).normalize(), ww);
+        acc.f.addScaledVector(H.sub(E).normalize(), ww);
+        acc.hf.addScaledVector(hf, ww); acc.hs.addScaledVector(hs, ww);
+        w += ww;
+      }
+      if (w < 0.01) continue;
+      for (const key in acc) acc[key].applyQuaternion(rootInv).normalize();
+      out[side] = { ...acc, w };
+    }
+    return out;
+  }
+
+  /** The current body pose (cross-fading to the one picked in the style), as blended pose values. */
+  _pose(dt, t) {
+    const want = this.style.pose || 'stand', W = this.poseW;
+    const k = 1 - Math.exp(-dt * 2.5); // about 1.5 s, gentle enough that hair doesn't fly up
+    if (!(want in W)) W[want] = 0;
+    for (const n of Object.keys(W)) {
+      W[n] += ((n === want ? 1 : 0) - W[n]) * k;
+      if (n !== want && W[n] < 0.002) delete W[n];
+    }
+    const out = Object.fromEntries(POSE_KEYS.map((key) => [key, 0]));
+    if (!this.legs) return out;
+    let sum = 0;
+    for (const n in W) sum += W[n];
+    for (const n in W) {
+      const v = poseValues(n, t, this.legs), w = W[n] / (sum || 1);
+      for (const key in v) out[key] += v[key] * w;
+    }
+    this.poseDrop = Math.max(0, -out.hy);
+    if (Math.abs(this.poseDrop - this._framedDrop) > 0.002) this._frameCamera();
+    return out;
+  }
+
+  /**
+   * Relaxed, slightly curled fingers (instead of the model's straight T-pose fingers) that move a
+   * little. Flatter while a pose rests the hand somewhere. Hand tracking blends over this.
+   */
+  _idleFingers(t) {
+    const hb = (n) => this.vrm.humanoid.getNormalizedBoneNode(n), s = this.axis;
+    let rest = 0, sum = 0; // how much the hands rest on something (flatter fingers)
+    for (const n in this.poseW) { sum += this.poseW[n]; const a = poseArms(n); rest += this.poseW[n] * ((a.l ? 0.5 : 0) + (a.r ? 0.5 : 0)); }
+    rest = sum ? rest / sum : 0;
+    const flat = 1 - 0.55 * rest;
+    FINGER_SEGMENTS.forEach(([bone], i) => {
+      const finger = Math.floor(i / 3), seg = i % 3; // 0 thumb, 1 index … 4 little; 0 proximal … 2 distal
+      for (const [side, sg] of [['left', -1], ['right', 1]]) {
+        const node = hb(side + bone);
+        if (!node) continue;
+        const wob = Math.sin(t * 0.7 + finger * 0.9 + (sg > 0 ? 1.7 : 0)) * 0.05;
+        if (finger === 0) {
+          // thumb: tucked a little toward the palm
+          node.rotation.set(0, sg * -0.25 * (seg === 0 ? 1 : 0.5), sg * s * (0.1 + 0.15 * seg + wob * 0.5) * flat);
+        } else {
+          const curl = ([0.3, 0.42, 0.3][seg] + 0.06 * finger + wob) * flat;
+          node.rotation.set(0, 0, sg * s * curl);
+        }
+      }
+    });
   }
 
   _idleBlink(t) {
@@ -539,9 +668,38 @@ export class AvatarStage {
   }
 }
 
+/**
+ * Auto expressions: read the emotion off the face-shape weights (no extra model needed). Each one
+ * combines several cues (one cue alone, like raised brows, is too common in normal talking), scaled by
+ * the broadcaster's sensitivity (ag); only the strongest shows, so they don't blur together.
+ * @param b  ARKit blendshape weights
+ * @returns { scores: {happy, sad, angry, surprised}, top: [name, score] | null }
+ */
+export function autoExpression(b, ag = {}) {
+  const B = (n) => b[ARKIT_INDEX[n]] || 0;
+  const avg = (a, c) => (B(a) + B(c)) / 2, pos = (v) => Math.max(0, v);
+  const smile = avg('mouthSmileLeft', 'mouthSmileRight');
+  const browInner = B('browInnerUp'), browOuter = avg('browOuterUpLeft', 'browOuterUpRight');
+  const browDown = avg('browDownLeft', 'browDownRight'), frown = avg('mouthFrownLeft', 'mouthFrownRight');
+  const wide = avg('eyeWideLeft', 'eyeWideRight'), squint = avg('eyeSquintLeft', 'eyeSquintRight');
+  const sneer = avg('noseSneerLeft', 'noseSneerRight'), press = avg('mouthPressLeft', 'mouthPressRight');
+  const cheek = avg('cheekSquintLeft', 'cheekSquintRight');
+  const notSmiling = 1 - clamp01(smile * 1.5);
+  const raw = {
+    happy: pos(smile - 0.22) * 1.8 + cheek * 0.3,
+    sad: (pos(frown - 0.03) * 3 + pos(browInner - browOuter - 0.05) * 1.8 + pos(B('mouthShrugLower') - 0.15) * 0.6) * notSmiling,
+    angry: (pos(browDown - 0.1) * 2.2 + sneer * 1.4 + pos(squint - 0.25) * 0.6 + press * 0.5) * notSmiling,
+    surprised: pos((browInner + browOuter) / 2 - 0.18) * 1.4 + pos(wide - 0.08) * 1.6 + pos(B('jawOpen') - 0.25) * 0.6,
+  };
+  const scores = {};
+  let top = null;
+  for (const k in raw) { scores[k] = clamp01(raw[k] * (ag[k] ?? 1)); if (!top || scores[k] > scores[top]) top = k; }
+  return { scores, top: top && scores[top] > 0.12 ? [top, scores[top]] : null };
+}
+
 function newArmState() {
   return {
-    w: 0, hw: 0, init: false, hinit: false,
+    w: 0, hw: 0, hg: 0, init: false, hinit: false,
     u: new THREE.Vector3(), f: new THREE.Vector3(), hf: new THREE.Vector3(), hs: new THREE.Vector3(),
     g: Array.from({ length: 15 }, () => new THREE.Vector3()),
   };

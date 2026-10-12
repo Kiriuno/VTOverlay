@@ -54,7 +54,10 @@ export const DEFAULT_STYLE = {
   vm: { aa: 1, ee: 1, ih: 1, oh: 1, ou: 1 }, // hard limit: each mouth shape never goes past this
   ag: { happy: 1, sad: 1, angry: 1, surprised: 1 }, // auto expression sensitivity
   light: { color: '#ffffff', i: 0.9, x: 0.32, y: 0.72, z: 0.62, amb: 0.45, ambColor: '#ffffff' },
+  pose: 'stand', // body pose, one of POSES
 };
+/** Body poses the broadcaster can pick (legs, hips, a bit of spine; head, face and arms stay tracked). */
+export const POSES = [['stand', 'Standing'], ['relaxed', 'Relaxed (weight on one leg)'], ['walk', 'Walking'], ['sit', 'Sitting (chair)'], ['floor', 'Sitting on the floor'], ['kneel', 'Kneeling'], ['seiza', 'Sitting back on the knees']];
 /** Clean up a style received from the network / storage (anything missing → default). */
 export function normalizeStyle(st = {}) {
   const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);
@@ -75,17 +78,18 @@ export function normalizeStyle(st = {}) {
       amb: num(l.amb, D.light.amb, 0, 2), ambColor: col(l.ambColor, D.light.ambColor),
     },
     fx: normalizeFx(st.fx),
+    pose: POSES.some(([k]) => k === st.pose) ? st.pose : D.pose,
   };
 }
 
 // Headpat / boop areas (fine-tuning by the broadcaster, in metres / multipliers, relative to what's
 // detected automatically from the model's head and eyes): hy = head area up/down, hs = head area size,
 // ny / nz = nose up/down and forward/back, ns = nose area size.
-export const DEFAULT_FX = { hy: 0, hs: 1, ny: 0, nz: 0, ns: 1 };
+export const DEFAULT_FX = { hy: 0, hz: 0, hs: 1, ny: 0, nz: 0, ns: 1 };
 export function normalizeFx(fx = {}) {
   const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);
   const D = DEFAULT_FX; fx = fx || {};
-  return { hy: num(fx.hy, D.hy, -0.3, 0.3), hs: num(fx.hs, D.hs, 0.3, 3), ny: num(fx.ny, D.ny, -0.15, 0.15), nz: num(fx.nz, D.nz, -0.15, 0.15), ns: num(fx.ns, D.ns, 0.3, 3) };
+  return { hy: num(fx.hy, D.hy, -0.3, 0.3), hz: num(fx.hz, D.hz, -0.3, 0.3), hs: num(fx.hs, D.hs, 0.3, 3), ny: num(fx.ny, D.ny, -0.15, 0.15), nz: num(fx.nz, D.nz, -0.15, 0.15), ns: num(fx.ns, D.ns, 0.3, 3) };
 }
 
 // Full screen viewers hide the avatar after this long without live tracking (paused, face lost, disconnected).

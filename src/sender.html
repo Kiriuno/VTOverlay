@@ -203,6 +203,7 @@
         <button class="primary" id="load">Load .vrm…</button>
         <input type="file" id="file" accept=".vrm" hidden>
       </div>
+      <div class="row" style="margin-top:8px" title="Your body pose. Head, face and arm tracking still work on top of it."><span style="flex:none">Pose</span><select id="poseSel" style="flex:1"></select></div>
       <div class="hint muted" style="margin-top:6px">Your webcam image never leaves this computer. Viewers only receive head/face movement numbers. The model is sent to viewers automatically, they don't need the file.</div>
     </details>
 
@@ -300,6 +301,7 @@
       <details id="fxAreas"><summary>Adjust headpat &amp; boop areas</summary>
         <div class="hint muted" style="margin:4px 0">The areas are found from your model's head and eyes; nudge them if they're off. They're outlined in the preview while this is open.</div>
         <div class="slider"><span>Head area ↕</span><input type="range" id="fxHy" min="-0.3" max="0.3" step="0.005"></div>
+        <div class="slider"><span>Head area forward ↔ back</span><input type="range" id="fxHz" min="-0.3" max="0.3" step="0.005"></div>
         <div class="slider"><span>Head area size</span><input type="range" id="fxHs" min="0.3" max="3" step="0.05"></div>
         <div class="slider"><span>Nose ↕</span><input type="range" id="fxNy" min="-0.15" max="0.15" step="0.002"></div>
         <div class="slider"><span>Nose forward ↔ back</span><input type="range" id="fxNz" min="-0.15" max="0.15" step="0.002"></div>

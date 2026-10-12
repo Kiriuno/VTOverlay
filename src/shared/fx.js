@@ -84,7 +84,7 @@ export class AvatarFx {
       local.set(local.x / (s.x || 1), local.y / (s.y || 1), local.z / (s.z || 1));
       return this.head.localToWorld(local);
     };
-    const patRest = r.patC.clone().add(new THREE.Vector3(0, fx.hy || 0, 0));
+    const patRest = r.patC.clone().add(new THREE.Vector3(0, fx.hy || 0, fx.hz || 0));
     const noseRest = r.noseC.clone().add(new THREE.Vector3(0, fx.ny || 0, fx.nz || 0));
     return {
       pat: { c: toWorld(patRest), r: r.patR * (fx.hs || 1) },

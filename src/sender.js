@@ -2,10 +2,10 @@
 // The webcam image never leaves this page; only numbers are sent.
 import * as THREE from 'three';
 import { FaceLandmarker, PoseLandmarker, HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { AvatarStage } from './shared/avatar.js';
+import { AvatarStage, autoExpression } from './shared/avatar.js';
 import {
   ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT, effectiveZone,
-  VISEMES, AUTO_EXPR, DEFAULT_STYLE, DEFAULT_FX, normalizeStyle, IS_DEV, DEV_CODE,
+  VISEMES, AUTO_EXPR, POSES, DEFAULT_STYLE, DEFAULT_FX, normalizeStyle, IS_DEV, DEV_CODE,
   HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, MOTION_MAX_BUFFERED, peerOptions,
 } from './shared/protocol.js';
 import { buildArmPayload, ArmTracker } from './shared/arms.js';
@@ -121,7 +121,7 @@ showRoll();
 let style = stage.setStyle(settings.style);
 let styleSendTimer = null;
 function updateStyle(patch) {
-  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx } });
+  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx }, pose: patch.pose ?? style.pose });
   settings.style = style; saveSettings();
   if (!styleSendTimer) styleSendTimer = setTimeout(() => { styleSendTimer = null; broadcastControl({ t: 'style', ...style }); }, 80);
   showStyle();
@@ -139,10 +139,11 @@ $('autoRows').innerHTML = AUTO_EXPR.map(([k, l]) =>
   `<div class="slider dual"><span>${l} <output id="agOut_${k}"></output></span><input type="range" id="ag_${k}" min="0" max="3" step="0.05" title="Sensitivity"><span class="meter" title="Read from your face now (the line is where it starts to show)"><i id="agBar_${k}"></i><b></b></span></div>`).join('');
 for (const [k] of AUTO_EXPR) $('ag_' + k).oninput = (e) => updateStyle({ ag: { [k]: +e.target.value } });
 $('autoReset').onclick = () => updateStyle({ ag: DEFAULT_STYLE.ag });
+let autoScores = null; // what the auto expressions read from your face (set per tracked frame)
 (function meters() {
   requestAnimationFrame(meters);
   if (!$('autoTune').open) return;
-  const sc = stage.autoScores || {};
+  const sc = autoScores || stage.autoScores || {};
   for (const [k] of AUTO_EXPR) $('agBar_' + k).style.width = Math.round((sc[k] || 0) * 100) + '%';
 })();
 
@@ -184,9 +185,11 @@ $('lightDelPreset').onclick = () => {
 renderLightPresets();
 
 // headpat / boop areas (fine-tuning; outlined in the preview while the panel is open)
-const FX_INPUTS = { fxHy: 'hy', fxHs: 'hs', fxNy: 'ny', fxNz: 'nz', fxNs: 'ns' };
+const FX_INPUTS = { fxHy: 'hy', fxHz: 'hz', fxHs: 'hs', fxNy: 'ny', fxNz: 'nz', fxNs: 'ns' };
 for (const [id, k] of Object.entries(FX_INPUTS)) $(id).oninput = (e) => updateStyle({ fx: { [k]: +e.target.value } });
 $('fxReset').onclick = () => updateStyle({ fx: DEFAULT_FX });
+$('poseSel').innerHTML = POSES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('');
+$('poseSel').onchange = (e) => updateStyle({ pose: e.target.value });
 $('fxAreas').addEventListener('toggle', () => { stage.fx.showAreas = $('fxAreas').open; });
 function showStyle() {
   for (const [k] of AUTO_EXPR) { $('ag_' + k).value = style.ag[k]; $('agOut_' + k).textContent = '×' + style.ag[k].toFixed(2); }
@@ -196,6 +199,7 @@ function showStyle() {
   }
   for (const [id, k] of Object.entries(LIGHT_INPUTS)) $(id).value = style.light[k];
   for (const [id, k] of Object.entries(FX_INPUTS)) $(id).value = style.fx[k];
+  $('poseSel').value = style.pose;
   $('lightColorHex').textContent = style.light.color; $('lightAmbColorHex').textContent = style.light.ambColor;
   const { x, y, z } = style.light, words = [];
   if (z > 0.35) words.push('the front'); else if (z < -0.35) words.push('behind');
@@ -1217,8 +1221,8 @@ function renderPropList() {
         <div class="hint muted onscreen" ${d.attach === 'screen' ? '' : 'hidden'} style="margin:4px 0">Shown on full-screen viewers' monitors, anywhere you like, always facing them: move it in <b>Place on viewer's screen</b>.</div>
         <div class="follow" ${attached && d.attach !== 'screen' ? '' : 'hidden'}>
           <div class="slider" title="1 = moves exactly with that body part · 0.5 = halfway · 0 = stays where it is at rest"><span>Follow strength</span><input type="range" data-k="w" min="0" max="1" step="0.05"></div>
-          <label class="toggle" title="Off: it turns with the body part but doesn't travel with it">Follow its position <input type="checkbox" data-k="fp"></label>
-          <label class="toggle" title="Off: it travels with the body part but keeps its own angle">Follow its rotation <input type="checkbox" data-k="fr"></label>
+          <label class="toggle" title="Off: it stays in place, but still turns exactly as it does when following">Follow its position <input type="checkbox" data-k="fp"></label>
+          <label class="toggle" title="Off: it moves exactly as it does when following, but keeps its own angle">Follow its rotation <input type="checkbox" data-k="fr"></label>
         </div>
         <div class="slider" title="Behind / in front of the avatar, or by its real distance (then it can go e.g. between an arm and the body). Among props drawn the same way, higher in this list = in front."><span>Draw</span><select data-k="draw">${DRAW_MODES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
         <label class="toggle">Always face the camera <input type="checkbox" data-k="face"></label>
@@ -1580,17 +1584,24 @@ function buildFrame(result, nowMs) {
   if (settings.linkEyes) { const m = (b[BLINK_IDX[0]] + b[BLINK_IDX[1]]) / 2; b[BLINK_IDX[0]] = b[BLINK_IDX[1]] = m; }
   b[JAW_IDX] = Math.min(1, b[JAW_IDX] * settings.mouthGain);
   // per-expression tuning: e.g. a closed-eye "joy" face shouldn't blink, a pout shouldn't open the mouth
-  const tune = activeExpr && settings.exprTune[activeExpr];
+  // Auto expressions use their expression's tuning too, as strongly as the expression shows. They're
+  // read here, before the tuning, so e.g. tuning the smile away for "happy" doesn't switch happy off.
+  const auto = autoExpression(b, style.ag);
+  autoScores = auto.scores;
+  const ax = settings.autoExpr && !activeExpr ? auto.top : null;
+  const tuneName = activeExpr || ax?.[0], tw = activeExpr ? 1 : Math.min(1, (ax?.[1] || 0) * 2);
+  const tune = tuneName && settings.exprTune[tuneName];
   if (tune) {
-    for (const i of MOUTH_IDX) b[i] = Math.min(1, b[i] * tune.mouth);
-    for (const i of BLINK_IDX) b[i] = Math.min(1, b[i] * tune.blink);
+    const mul = (v) => 1 + (v - 1) * tw;
+    for (const i of MOUTH_IDX) b[i] = Math.min(1, b[i] * mul(tune.mouth));
+    for (const i of BLINK_IDX) b[i] = Math.min(1, b[i] * mul(tune.blink));
   }
   // hard limits (after every sensitivity): the mouth / eyelids never go past these
   if (settings.mouthMax < 1) for (const i of MOUTH_IDX) b[i] = Math.min(settings.mouthMax, b[i]);
   if (settings.blinkMax < 1) for (const i of BLINK_IDX) b[i] = Math.min(settings.blinkMax, b[i]);
 
   const frame = {
-    t: 'm', f: true, x: activeExpr, ae: settings.autoExpr,
+    t: 'm', f: true, x: activeExpr, ae: settings.autoExpr, ax: ax && [ax[0], +ax[1].toFixed(3)],
     q: q.toArray().map((v) => +v.toFixed(4)),
     p: p.toArray().map((v) => +v.toFixed(4)),
     b: b.map((v) => +Math.max(0, v).toFixed(3)),

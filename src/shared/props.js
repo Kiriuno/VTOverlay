@@ -200,9 +200,9 @@ export class PropLayer {
   }
 
   /**
-   * The frame an attached prop hangs from, in avatar space: position Pw and rotation Rw, so the prop
-   * sits at Pw + Rw·pos, turned by Rw. Blends the bone's rest and current transform by the follow
-   * strength, separately for position and rotation.
+   * The frame an attached prop hangs from, in avatar space: position P and rotation R, so the prop
+   * sits at P + R·pos, turned by R. Blends the bone's rest and current transform by the follow
+   * strength. The position / rotation locks are applied in _place, on top of this same frame.
    */
   _frame(d, out = { P: new THREE.Vector3(), R: new THREE.Quaternion() }) {
     const rest = this.boneRest[d.attach];
@@ -213,9 +213,8 @@ export class PropLayer {
     const spaceQ = this.avatarSpace.getWorldQuaternion(tq).invert();
     const Q1 = node.getWorldQuaternion(new THREE.Quaternion()).premultiply(spaceQ);
     const dq = Q1.multiply(rest.q0.clone().invert()); // bone's rotation since rest
-    const wp = d.fp ? d.w : 0, wr = d.fr ? d.w : 0;
-    out.P.copy(rest.p0).lerp(P1, wp);
-    out.R.copy(IDENT).slerp(dq, wr);
+    out.P.copy(rest.p0).lerp(P1, d.w);
+    out.R.copy(IDENT).slerp(dq, d.w);
     return out;
   }
 
@@ -247,8 +246,12 @@ export class PropLayer {
     }
     const f = this._frame(d, it.frame || (it.frame = { P: new THREE.Vector3(), R: new THREE.Quaternion() }));
     if (!f) return;
-    mesh.position.copy(pos).applyQuaternion(f.R).add(f.P);
-    mesh.quaternion.copy(f.R).multiply(this._ownRot(d));
+    // Position follow off: it stays where it would be with the avatar at rest. Rotation follow off: it
+    // keeps its own angle. Each lock leaves the other half exactly as it is without locks.
+    if (d.fp) mesh.position.copy(pos).applyQuaternion(f.R).add(f.P);
+    else mesh.position.copy(pos).add(this.boneRest[d.attach].p0);
+    if (d.fr) mesh.quaternion.copy(f.R).multiply(this._ownRot(d));
+    else mesh.quaternion.copy(this._ownRot(d));
   }
 
   /** Per-frame: follow the bones, billboards turn toward the camera, then set the drawing order. */
@@ -313,6 +316,7 @@ export class PropLayer {
     this._syncAvatarSpace();
     const f = this._frame(d);
     if (!f) return null;
+    if (!d.fp) return this.avatarSpace.worldToLocal(world.clone()).sub(this.boneRest[d.attach].p0).toArray();
     const local = this.avatarSpace.worldToLocal(world.clone()).sub(f.P);
     return local.applyQuaternion(f.R.clone().invert()).toArray();
   }
