@@ -110,7 +110,9 @@
     upInfo = r;
     $('checkUpdates').textContent = 'Check for updates';
     if (r.state === 'available') {
+      if (!$('upCancel').hidden) return; // an update is already downloading
       $('update').hidden = false;
+      $('upButtons').hidden = false; $('upBar').hidden = true;
       $('upTitle').textContent = 'Update available';
       $('upText').textContent = `Version ${r.latest} is out (you have ${r.current}). The download is about ${Math.round((r.size || 0) / 1048576)} MB and VTOverlay restarts by itself.`;
     } else if (manual) {

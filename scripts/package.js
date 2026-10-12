@@ -22,6 +22,18 @@ const TARGETS = {
 const PLATFORM = (process.argv.find((a) => a.startsWith('--platform=')) || '--platform=win32').split('=')[1];
 const ZIP = process.argv.includes('--zip');
 
+// Every dependency must be installed, or the packaged app breaks at runtime (e.g. after package.json
+// gained a dependency and `npm install` wasn't run again).
+function checkDependencies() {
+  const missing = Object.keys(pkg.dependencies || {}).filter((d) => {
+    return !fs.existsSync(path.join(ROOT, 'node_modules', ...d.split('/'), 'package.json'));
+  });
+  if (missing.length) {
+    console.error(`\n✖ Missing dependencies: ${missing.join(', ')}. Run "npm install" first, then build again.`);
+    process.exit(1);
+  }
+}
+
 async function build(key) {
   const { packager } = await import('@electron/packager');
   const t = TARGETS[key];
@@ -68,6 +80,7 @@ async function build(key) {
 }
 
 (async () => {
+  checkDependencies();
   const keys = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   for (const k of keys.length ? keys : ['full']) await build(k);
 })().catch((err) => { console.error(err); process.exit(1); });

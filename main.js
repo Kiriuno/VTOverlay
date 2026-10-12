@@ -198,12 +198,15 @@ function showLauncher() {
   mainWin.on('closed', () => { mainWin = null; });
 }
 
+// "just updated" / "update failed" are shown on the first start screen of this launch only; coming
+// back to the start screen later (after broadcasting…) must not show them again
+let launchNotice = { justUpdated: process.argv.includes('--vt-updated'), updateFailed: process.argv.includes('--vt-update-failed') };
+const takeLaunchNotice = () => { const n = launchNotice; launchNotice = { justUpdated: false, updateFailed: false }; return n; };
 ipcMain.handle('get-config', () => ({
+  ...takeLaunchNotice(),
   receiverOnly: RECEIVER_ONLY,
   displays: displayList(),
   version: PKG.version,
-  justUpdated: process.argv.includes('--vt-updated'),
-  updateFailed: process.argv.includes('--vt-update-failed'),
   autoUpdate: takeAutoUpdate(), // true only for the first start screen of this launch
   repo: updater.REPO,
 }));

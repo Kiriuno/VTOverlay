@@ -77,7 +77,8 @@ async function download(url, file, onProgress, signal) {
  * hold plain files and folders, so anything else means the download isn't what we expect.
  */
 function unzip(zipPath, dir) {
-  const yauzl = require('yauzl');
+  let yauzl;
+  try { yauzl = require('yauzl'); } catch { return unzipWithTar(zipPath, dir); } // a build made without it
   const root = path.resolve(dir);
   fs.mkdirSync(root, { recursive: true });
   return new Promise((resolve, reject) => {
@@ -102,6 +103,34 @@ function unzip(zipPath, dir) {
         });
       });
       zip.readEntry();
+    });
+  });
+}
+
+/**
+ * Fallback for builds that were packaged without yauzl: Windows 10+ ships tar.exe (bsdtar), which
+ * reads zips and itself refuses absolute paths and ".." (elsewhere: unzip). Links are checked afterwards.
+ */
+function unzipWithTar(zipPath, dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  return new Promise((resolve, reject) => {
+    const [cmd, args] = process.platform === 'win32'
+      ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-x', '-f', zipPath, '-C', dir]]
+      : ['unzip', ['-q', '-o', zipPath, '-d', dir]]; // GNU tar can't read zips
+    const p = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    let errText = '';
+    p.stderr.on('data', (d) => { errText += d; });
+    p.on('error', reject);
+    p.on('close', (code) => {
+      if (code !== 0) return reject(new Error('could not extract the update (' + path.basename(cmd) + ': ' + (errText.trim() || 'exit ' + code) + ')'));
+      const walk = (d) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const f = path.join(d, e.name);
+          if (e.isSymbolicLink()) throw new Error('update archive contains a link: ' + path.relative(dir, f));
+          if (e.isDirectory()) walk(f);
+        }
+      };
+      try { walk(dir); resolve(); } catch (err) { reject(err); }
     });
   });
 }
@@ -206,4 +235,4 @@ function cleanup() {
   } catch {}
 }
 
-module.exports = { check, install, applyIfRequested, cleanup, isNewer, assetName, REPO };
+module.exports = { check, install, applyIfRequested, cleanup, isNewer, assetName, REPO, _unzip: unzip };
