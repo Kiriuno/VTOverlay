@@ -2,7 +2,7 @@
 //   node scripts/package.js full     -> dist/VTOverlay-win32-x64          (broadcast + view)
 //   node scripts/package.js viewer   -> dist/VTOverlay-Viewer-win32-x64   (view only, smaller, no webcam code)
 //   node scripts/package.js full viewer   -> both
-//   add --zip to also write release zips (dist/VTOverlay-win32-x64.zip, …) — what GitHub releases need
+//   add --zip to also write release zips (dist/VTOverlay-win32-x64.zip, …), what GitHub releases need
 //   add --platform=linux to build for another OS (used to test the updater)
 const path = require('path');
 const fs = require('fs');

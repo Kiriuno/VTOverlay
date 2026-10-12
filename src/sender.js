@@ -5,12 +5,12 @@ import { FaceLandmarker, PoseLandmarker, HandLandmarker, FilesetResolver } from 
 import { AvatarStage } from './shared/avatar.js';
 import {
   ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT, effectiveZone,
-  VISEMES, DEFAULT_STYLE, normalizeStyle,
+  VISEMES, AUTO_EXPR, DEFAULT_STYLE, DEFAULT_FX, normalizeStyle, IS_DEV, DEV_CODE,
   HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, MOTION_MAX_BUFFERED, peerOptions,
 } from './shared/protocol.js';
 import { buildArmPayload, ArmTracker } from './shared/arms.js';
 import { OneEuroArray } from './shared/filters.js';
-import { PROP_ATTACH } from './shared/props.js';
+import { PROP_ATTACH, DRAW_MODES, normalizeProp } from './shared/props.js';
 import { SpringGrabber } from './shared/grab.js';
 
 const $ = (id) => document.getElementById(id);
@@ -24,35 +24,77 @@ const SEND_INTERVAL_MS = 33; // ~30 Hz
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, armSmoothing: 0.6, viewerGrab: false, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
     return { ...defaults, ...saved, v: 2 };
   } catch { return defaults; }
 }
-function saveSettings() { try { localStorage.setItem('vt-settings', JSON.stringify(settings)); } catch {} }
+function saveSettings() {
+  snapshotModelProfile();
+  try { localStorage.setItem('vt-settings', JSON.stringify(settings)); } catch {}
+}
+
+// ---- sensitivity is remembered per avatar ----
+// (each model's mouth, blink, vowel, per-expression and body-movement sensitivities; a model seen for
+// the first time starts from whatever is set now)
+const PROFILE_KEYS = ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'bodyX', 'bodyY', 'bodyZ'];
+let profileModel = null; // id of the model whose profile the current values belong to
+function snapshotModelProfile() {
+  if (!profileModel || !settings.style) return;
+  settings.models[profileModel] = {
+    ...Object.fromEntries(PROFILE_KEYS.map((k) => [k, settings[k]])),
+    exprTune: JSON.parse(JSON.stringify(settings.exprTune || {})), vg: { ...(settings.style.vg || {}) }, vm: { ...(settings.style.vm || {}) },
+  };
+}
+function loadModelProfile(id, name) {
+  snapshotModelProfile(); // keep the outgoing model's values
+  profileModel = id;
+  const prof = settings.models[id];
+  if (prof) {
+    for (const k of PROFILE_KEYS) if (prof[k] !== undefined) { settings[k] = prof[k]; $(k).value = prof[k]; }
+    settings.exprTune = prof.exprTune || {};
+    if (prof.vg || prof.vm) updateStyle({ vg: prof.vg || {}, vm: prof.vm || DEFAULT_STYLE.vm });
+    showLimits();
+    showExprTune();
+  }
+  $('sensFor').textContent = `Saved for “${name}”${prof ? '' : ' (new: started from your current settings)'}. Each avatar remembers its own.`;
+  saveSettings();
+}
 const applyToggles = () => {
   document.body.classList.toggle('camHidden', settings.hideCam);
   $('armsHint').hidden = !settings.arms;
   $('armSmoothRow').hidden = !settings.arms;
   if (settings.arms) initBodyTrackers();
 };
-for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab']) {
+for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab', 'viewerPat']) {
   $(k).checked = settings[k];
   $(k).onchange = () => {
     settings[k] = $(k).checked; saveSettings(); applyToggles();
     if (k === 'arms' && !paused) openCamera(); // switch camera resolution (720p for hands)
     if (k === 'viewerGrab') setViewerGrab(settings.viewerGrab);
+    if (k === 'viewerPat') broadcastControl({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat });
   };
 }
-for (const k of ['mouthGain', 'blinkGain', 'smoothing', 'bodyX', 'bodyY', 'bodyZ', 'armSmoothing']) {
+for (const k of ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'smoothing', 'bodyX', 'bodyY', 'bodyZ', 'armSmoothing']) {
   $(k).value = settings[k];
   $(k).oninput = () => {
     settings[k] = parseFloat($(k).value); saveSettings();
     if (k === 'smoothing') tuneFilters();
     if (k === 'armSmoothing') armTracker.setSmoothing(settings.armSmoothing);
+    showLimits();
   };
+}
+
+// sidebar sections remember whether they were open
+{
+  let open = {};
+  try { open = JSON.parse(localStorage.getItem('vt-sections') || '{}'); } catch {}
+  document.querySelectorAll('details.sec[data-sec]').forEach((d) => {
+    if (open[d.dataset.sec] !== undefined) d.open = open[d.dataset.sec];
+    d.addEventListener('toggle', () => { open[d.dataset.sec] = d.open; try { localStorage.setItem('vt-sections', JSON.stringify(open)); } catch {} });
+  });
 }
 
 // ---------------- avatar preview + view controls (viewers see the same framing) ----------------
@@ -69,36 +111,102 @@ function updateView(patch) {
   if (!viewSendTimer) viewSendTimer = setTimeout(() => { viewSendTimer = null; broadcastControl({ t: 'view', ...view }); }, 50);
 }
 updateView({});
+// roll: turn the whole picture (sideways, upside down…)
+function showRoll() { $('roll').value = Math.round(view.roll || 0); $('rollOut').textContent = Math.round(view.roll || 0) + '°'; }
+$('roll').oninput = () => { updateView({ roll: Number($('roll').value) }); showRoll(); };
+document.querySelectorAll('[data-roll]').forEach((b) => { b.onclick = () => { updateView({ roll: Number(b.dataset.roll) }); showRoll(); }; });
+showRoll();
 
 // ---------------- look: lighting + per-vowel mouth sensitivity (viewers get the same) ----------------
 let style = stage.setStyle(settings.style);
 let styleSendTimer = null;
 function updateStyle(patch) {
-  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, light: { ...style.light, ...patch.light } });
+  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx } });
   settings.style = style; saveSettings();
   if (!styleSendTimer) styleSendTimer = setTimeout(() => { styleSendTimer = null; broadcastControl({ t: 'style', ...style }); }, 80);
   showStyle();
 }
-$('vowelSliders').innerHTML = VISEMES.map(([k, l]) =>
-  `<div class="slider"><span>${l} <output id="vgOut_${k}"></output></span><input type="range" id="vg_${k}" min="0" max="3" step="0.05"></div>`).join('');
-for (const [k] of VISEMES) $('vg_' + k).oninput = (e) => updateStyle({ vg: { [k]: +e.target.value } });
-$('vowelReset').onclick = () => updateStyle({ vg: DEFAULT_STYLE.vg });
-const LIGHT_INPUTS = { lightColor: 'color', lightI: 'i', lightAz: 'az', lightEl: 'el', lightAmb: 'amb', lightAmbColor: 'ambColor' };
+$('vowelSliders').innerHTML = '<div class="slider dual head"><span></span><small>sensitivity</small><small>limit</small></div>' + VISEMES.map(([k, l]) =>
+  `<div class="slider dual"><span>${l} <output id="vgOut_${k}"></output></span><input type="range" id="vg_${k}" min="0" max="3" step="0.05" title="Sensitivity">` +
+  `<input type="range" id="vm_${k}" min="0" max="1" step="0.02" title="Limit: never opens past this"></div>`).join('');
+for (const [k] of VISEMES) {
+  $('vg_' + k).oninput = (e) => updateStyle({ vg: { [k]: +e.target.value } });
+  $('vm_' + k).oninput = (e) => updateStyle({ vm: { [k]: +e.target.value } });
+}
+$('vowelReset').onclick = () => updateStyle({ vg: DEFAULT_STYLE.vg, vm: DEFAULT_STYLE.vm });
+// auto expressions: sensitivity per emotion + a live meter of what's read from your face
+$('autoRows').innerHTML = AUTO_EXPR.map(([k, l]) =>
+  `<div class="slider dual"><span>${l} <output id="agOut_${k}"></output></span><input type="range" id="ag_${k}" min="0" max="3" step="0.05" title="Sensitivity"><span class="meter" title="Read from your face now (the line is where it starts to show)"><i id="agBar_${k}"></i><b></b></span></div>`).join('');
+for (const [k] of AUTO_EXPR) $('ag_' + k).oninput = (e) => updateStyle({ ag: { [k]: +e.target.value } });
+$('autoReset').onclick = () => updateStyle({ ag: DEFAULT_STYLE.ag });
+(function meters() {
+  requestAnimationFrame(meters);
+  if (!$('autoTune').open) return;
+  const sc = stage.autoScores || {};
+  for (const [k] of AUTO_EXPR) $('agBar_' + k).style.width = Math.round((sc[k] || 0) * 100) + '%';
+})();
+
+// limits next to the sensitivity sliders: the value shown as "max NN%"
+function showLimits() {
+  for (const k of ['mouthMax', 'blinkMax']) $(k + 'Out').textContent = settings[k] < 1 ? `max ${Math.round(settings[k] * 100)}%` : '';
+}
+const LIGHT_INPUTS = { lightColor: 'color', lightI: 'i', lightX: 'x', lightY: 'y', lightZ: 'z', lightAmb: 'amb', lightAmbColor: 'ambColor' };
 for (const [id, k] of Object.entries(LIGHT_INPUTS)) {
   $(id).oninput = (e) => updateStyle({ light: { [k]: e.target.type === 'color' ? e.target.value : +e.target.value } });
 }
-$('lightReset').onclick = () => updateStyle({ light: DEFAULT_STYLE.light });
+$('lightReset').onclick = () => { updateStyle({ light: DEFAULT_STYLE.light }); $('lightPreset').value = ''; };
+// lighting presets (kept on this computer)
+function renderLightPresets(selected = '') {
+  const names = Object.keys(settings.lightPresets).sort((a, b) => a.localeCompare(b));
+  $('lightPreset').innerHTML = `<option value="">${names.length ? 'Presets…' : 'No presets yet'}</option>` +
+    names.map((n) => `<option>${n.replace(/</g, '&lt;')}</option>`).join('');
+  $('lightPreset').value = names.includes(selected) ? selected : '';
+  $('lightDelPreset').hidden = !$('lightPreset').value;
+}
+$('lightPreset').onchange = () => {
+  const n = $('lightPreset').value;
+  if (n && settings.lightPresets[n]) updateStyle({ light: settings.lightPresets[n] });
+  $('lightDelPreset').hidden = !n;
+  $('lightPresetName').value = n;
+};
+$('lightSavePreset').onclick = () => {
+  const n = $('lightPresetName').value.trim();
+  if (!n) { $('lightPresetName').focus(); return; }
+  settings.lightPresets[n] = { ...style.light };
+  saveSettings(); renderLightPresets(n);
+};
+$('lightPresetName').onkeydown = (e) => { if (e.key === 'Enter') $('lightSavePreset').click(); };
+$('lightDelPreset').onclick = () => {
+  const n = $('lightPreset').value;
+  if (!n) return;
+  delete settings.lightPresets[n]; saveSettings(); renderLightPresets(); $('lightPresetName').value = '';
+};
+renderLightPresets();
+
+// headpat / boop areas (fine-tuning; outlined in the preview while the panel is open)
+const FX_INPUTS = { fxHy: 'hy', fxHs: 'hs', fxNy: 'ny', fxNz: 'nz', fxNs: 'ns' };
+for (const [id, k] of Object.entries(FX_INPUTS)) $(id).oninput = (e) => updateStyle({ fx: { [k]: +e.target.value } });
+$('fxReset').onclick = () => updateStyle({ fx: DEFAULT_FX });
+$('fxAreas').addEventListener('toggle', () => { stage.fx.showAreas = $('fxAreas').open; });
 function showStyle() {
-  for (const [k] of VISEMES) { $('vg_' + k).value = style.vg[k]; $('vgOut_' + k).textContent = '×' + style.vg[k].toFixed(2); }
+  for (const [k] of AUTO_EXPR) { $('ag_' + k).value = style.ag[k]; $('agOut_' + k).textContent = '×' + style.ag[k].toFixed(2); }
+  for (const [k] of VISEMES) {
+    $('vg_' + k).value = style.vg[k]; $('vm_' + k).value = style.vm[k];
+    $('vgOut_' + k).textContent = '×' + style.vg[k].toFixed(2) + (style.vm[k] < 1 ? ` · max ${Math.round(style.vm[k] * 100)}%` : '');
+  }
   for (const [id, k] of Object.entries(LIGHT_INPUTS)) $(id).value = style.light[k];
+  for (const [id, k] of Object.entries(FX_INPUTS)) $(id).value = style.fx[k];
   $('lightColorHex').textContent = style.light.color; $('lightAmbColorHex').textContent = style.light.ambColor;
-  const { az, el } = style.light;
-  const h = Math.abs(az) > 150 ? 'behind' : Math.abs(az) < 20 ? 'the front' : (az > 0 ? 'the right' : 'the left') + (Math.abs(az) > 110 ? ', behind' : '');
-  $('lightDesc').textContent = `From ${h}, ${el > 20 ? 'above' : el < -20 ? 'below' : 'level'}`;
+  const { x, y, z } = style.light, words = [];
+  if (z > 0.35) words.push('the front'); else if (z < -0.35) words.push('behind');
+  if (x > 0.3) words.push('the right'); else if (x < -0.3) words.push('the left');
+  if (y > 0.3) words.push('above'); else if (y < -0.3) words.push('below');
+  $('lightDesc').textContent = 'From ' + (words.length ? words.join(', ') : 'the front');
 }
 showStyle();
+showLimits();
 $('frBtn').onclick = () => updateView({ fr: view.fr === 'full' ? 'bust' : 'full', px: 0, py: 0 });
-$('resetView').onclick = () => updateView({ ...DEFAULT_VIEW, fr: view.fr });
+$('resetView').onclick = () => { updateView({ ...DEFAULT_VIEW, fr: view.fr, roll: view.roll }); showRoll(); }; // roll has its own buttons
 
 const canvas = $('stage');
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -120,13 +228,17 @@ canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 1 && e.button !== 2) return; // middle = move, right = rotate
   e.preventDefault();
   canvas.setPointerCapture(e.pointerId);
-  viewDrag = { mode: e.button === 1 ? 'pan' : 'rot', x: e.clientX, y: e.clientY, start: { ...view } };
+  viewDrag = { mode: e.button === 1 ? 'pan' : e.shiftKey ? 'roll' : 'rot', x: e.clientX, y: e.clientY, start: { ...view } };
   canvas.style.cursor = viewDrag.mode === 'pan' ? 'move' : 'ew-resize';
 });
 canvas.addEventListener('pointermove', (e) => {
   if (!viewDrag) return;
   const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y, H = canvas.clientHeight || 1;
-  if (viewDrag.mode === 'pan') updateView({ px: viewDrag.start.px + dx / H, py: viewDrag.start.py - dy / H });
+  if (viewDrag.mode === 'pan') {
+    // the drag is on screen; with the picture rolled, screen directions are turned in the world
+    const r = (view.roll || 0) * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
+    updateView({ px: viewDrag.start.px + (dx * c - dy * sn) / H, py: viewDrag.start.py + (-dx * sn - dy * c) / H });
+  } else if (viewDrag.mode === 'roll') { updateView({ roll: ((viewDrag.start.roll || 0) - dx * 0.5 + 540) % 360 - 180 }); showRoll(); }
   else updateView({ yaw: viewDrag.start.yaw + dx * 0.01, el: viewDrag.start.el + dy * 0.005 });
 });
 const endViewDrag = () => { viewDrag = null; canvas.style.cursor = ''; };
@@ -147,6 +259,7 @@ async function useModel(buf, name) {
     const id = await hashId(buf);
     const info = await stage.loadVRM(buf.slice(0), id);
     modelBuf = buf; modelName = name; modelId = id;
+    loadModelProfile(id, name);
     $('empty').hidden = true;
     $('modelName').textContent = name;
     $('modelName').classList.remove('muted');
@@ -154,6 +267,7 @@ async function useModel(buf, name) {
     buildExpressionButtons(info.expressions);
     storeLastModel(buf, name);
     for (const v of viewers.values()) if (v.model?.open) offerModel(v);
+    toOutput({ t: 'model', id, buf: buf.slice(0) });
     renderPlacement();
   } catch (err) {
     alert('Could not load this model:\n' + err.message);
@@ -194,7 +308,7 @@ async function restoreLastModel() {
 restoreLastModel();
 
 // ---------------- custom hotkeys (global: they work while another app has focus) ----------------
-// Bindings: { 'expr:<name>' | 'clear' | 'pause' | 'prop:<id>': accel } — accel in Electron syntax, e.g. "Ctrl+Alt+H".
+// Bindings: { 'expr:<name>' | 'clear' | 'pause' | 'prop:<id>': accel }, accel in Electron syntax, e.g. "Ctrl+Alt+H".
 // There are no default hotkeys: only the ones you set.
 let hotkeys = (() => { try { return JSON.parse(localStorage.getItem('vt-hotkeys') || '{}') || {}; } catch { return {}; } })();
 let hotkeyStatus = {}; // id -> registered OK?
@@ -206,7 +320,8 @@ function applyHotkeys() { clearTimeout(applyTimer); applyTimer = setTimeout(appl
 async function applyHotkeysNow() {
   const list = [];
   for (const [id, accel] of Object.entries(hotkeys)) {
-    const live = id === 'pause' || id === 'clear' || (id.startsWith('expr:') ? exprList.includes(id.slice(5)) : props.some((p) => 'prop:' + p.id === id));
+    const live = id === 'pause' || id === 'clear' || (id.startsWith('expr:') ? exprList.includes(id.slice(5))
+      : id.startsWith('group:') ? props.some((p) => p.group === id.slice(6)) : props.some((p) => 'prop:' + p.id === id));
     if (live) list.push({ accel, id });
   }
   hotkeyStatus = await window.vt.setHotkeys(list);
@@ -214,17 +329,22 @@ async function applyHotkeysNow() {
 }
 function refreshHotkeyBadges() {
   const pa = hotkeys.pause;
-  $('pauseHk').textContent = pa ? '⌨ ' + prettyAccel(pa) : '⌨';
+  $('pauseHk').textContent = pa ? '⌨︎ ' + prettyAccel(pa) : '⌨︎';
   $('pauseHk').classList.toggle('bad', hotkeyStatus.pause === false);
-  if (activeExpr) { const a = hotkeys['expr:' + activeExpr]; $('tuneHk').textContent = a ? '⌨ ' + prettyAccel(a) : '⌨ Hotkey'; }
+  if (activeExpr) { const a = hotkeys['expr:' + activeExpr]; $('tuneHk').textContent = a ? '⌨︎ ' + prettyAccel(a) : '⌨︎ Hotkey'; }
   document.querySelectorAll('#xrow [data-expr], #xrow [data-clear]').forEach((b) => {
     b.querySelector('small')?.remove();
     const id = b.dataset.clear ? 'clear' : 'expr:' + b.dataset.expr, accel = hotkeys[id];
     if (accel) b.insertAdjacentHTML('beforeend', `<small class="${hotkeyStatus[id] === false ? 'bad' : ''}" title="${hotkeyStatus[id] === false ? 'Another app already uses this combination' : ''}">${prettyAccel(accel)}</small>`);
   });
+  document.querySelectorAll('#propGroups .grow').forEach((row) => {
+    const id = 'group:' + row.dataset.group, accel = hotkeys[id], hk = row.querySelector('[data-a=ghk]');
+    hk.textContent = accel ? '⌨︎ ' + prettyAccel(accel) : '⌨︎ Hotkey';
+    hk.classList.toggle('bad', hotkeyStatus[id] === false);
+  });
   document.querySelectorAll('#propList .prop').forEach((row) => {
     const id = 'prop:' + row.dataset.id, accel = hotkeys[id], hk = row.querySelector('[data-a=hk]');
-    hk.textContent = accel ? '⌨ ' + prettyAccel(accel) : '⌨ Hotkey';
+    hk.textContent = accel ? '⌨︎ ' + prettyAccel(accel) : '⌨︎ Hotkey';
     hk.classList.toggle('bad', hotkeyStatus[id] === false);
     hk.title = hotkeyStatus[id] === false ? 'Another app already uses this combination' : 'Click to set a hotkey that shows/hides this prop';
   });
@@ -234,6 +354,7 @@ window.vt.onHotkey((id) => {
   if (id === 'clear') return setExpr(null);
   if (id.startsWith('expr:')) return toggleExpr(id.slice(5));
   if (id.startsWith('prop:')) { const p = props.find((x) => x.id === id.slice(5)); if (p) updateProp(p.id, { visible: !p.visible }); }
+  if (id.startsWith('group:')) { toggleGroup(id.slice(6)); renderGroups(); }
 });
 
 // key capture → accelerator. Letters follow your keyboard layout (AZERTY "A" is A);
@@ -270,10 +391,10 @@ function captureHotkey(title, current) {
       if (e.code === 'Escape' && !m.length) return done(null);
       if (e.code === 'Backspace' && !m.length) return done('');
       const key = keyFromEvent(e);
-      if (!key) { $('hkMsg').textContent = 'That key can’t be used — try a letter, digit, F-key, numpad key or arrow.'; return; }
+      if (!key) { $('hkMsg').textContent = 'That key can’t be used. Try a letter, digit, F-key, numpad key or arrow.'; return; }
       const special = /^(F\d+|num\w+|Pause|Scrolllock)$/.test(key);
       if (!special && !m.some((x) => x !== 'Shift')) {
-        $('hkMsg').textContent = 'Add Ctrl or Alt — on its own (or with just Shift) this key would stop typing everywhere else.';
+        $('hkMsg').textContent = 'Add Ctrl or Alt: on its own (or with just Shift) this key would stop typing everywhere else.';
         $('hkCombo').textContent = [...m, key].join(' + ');
         return;
       }
@@ -341,7 +462,7 @@ function showExprTune() {
   $('tuneMouth').value = t.mouth;
   $('tuneBlink').value = t.blink;
   const a = hotkeys['expr:' + activeExpr];
-  $('tuneHk').textContent = a ? '⌨ ' + prettyAccel(a) : '⌨ Hotkey';
+  $('tuneHk').textContent = a ? '⌨︎ ' + prettyAccel(a) : '⌨︎ Hotkey';
 }
 function setTune(patch) {
   if (!activeExpr) return;
@@ -370,6 +491,16 @@ const savedCode = () => { try { return localStorage.getItem('vt-code'); } catch 
 
 function setNet(state, text) { $('netDot').className = 'dot ' + state; $('netText').textContent = text; }
 
+// the code can be hidden (e.g. while streaming your screen); Copy still copies it
+let shownCode = null;
+function showCode(code) {
+  if (code !== undefined) shownCode = code;
+  $('code').textContent = !shownCode ? '······' : settings.hideCode ? '•'.repeat(shownCode.length) : shownCode;
+  $('code').dataset.code = shownCode || '';
+  $('hideCode').textContent = settings.hideCode ? 'Show' : 'Hide';
+  $('hideCode').title = settings.hideCode ? 'Show the room code' : 'Hide the room code (Copy still works)';
+}
+$('hideCode').onclick = () => { settings.hideCode = !settings.hideCode; saveSettings(); showCode(); };
 let sigTimer = null, sigFailures = 0, idTakenTries = 0;
 // Watchdog: an overloaded signalling server can accept the connection and then never answer, which
 // used to leave "Connecting…" on screen forever. If we're not registered within a while, start over.
@@ -379,7 +510,7 @@ setInterval(() => {
   const p = peer;
   if (!p || stopping || p.open || !sigAttemptAt || performance.now() - sigAttemptAt < SIG_TIMEOUT_MS()) return;
   sigHangs++;
-  const msg = `Can't reach the connection server — retrying (attempt ${sigHangs + 1})…` + (sigHangs >= 3 ? ' Check your internet connection / firewall.' : '');
+  const msg = `Can't reach the connection server, retrying (attempt ${sigHangs + 1})…` + (sigHangs >= 3 ? ' Check your internet connection / firewall.' : '');
   if (!p.destroyed && viewers.size) {
     // viewers are connected directly: keep them, just redo the signalling registration
     sigAttemptAt = performance.now();
@@ -398,15 +529,15 @@ function startPeer(code = savedCode() || randomCode()) {
   currentCode = code;
   sigAttemptAt = performance.now();
   // the code is known before the server confirms it (it's saved from last time): show it right away
-  $('code').textContent = code;
+  showCode(code);
   const p = peer = new window.Peer(PEER_PREFIX + code, peerOptions());
   p.on('open', () => {
     if (p !== peer) return;
     sigFailures = 0; idTakenTries = 0; sigHangs = 0; sigAttemptAt = 0;
     try { localStorage.setItem('vt-code', code); } catch {}
-    $('code').textContent = code;
+    showCode(code);
     updateViewers();
-    if (!viewers.size) setNet('ok', 'Online — waiting for viewers');
+    if (!viewers.size) setNet('ok', 'Online, waiting for viewers');
   });
   p.on('connection', (conn) => {
     const id = conn.peer;
@@ -447,7 +578,7 @@ function startPeer(code = savedCode() || randomCode()) {
     if (!v || call.metadata?.kind !== 'screen') { call.close(); return; }
     v.call?.close();
     v.call = call;
-    call.answer(); // receive only — we never send anything back on this call
+    call.answer(); // receive only, we never send anything back on this call
     call.on('stream', (stream) => { v.stream = stream; renderPlacement(); });
     const end = () => { if (v.call === call) { v.call = null; v.stream = null; renderPlacement(); } };
     call.on('close', end); call.on('error', end);
@@ -465,7 +596,7 @@ function startPeer(code = savedCode() || randomCode()) {
   };
   p.on('disconnected', () => {
     if (p !== peer || stopping || p.destroyed) return;
-    setNet('warn', viewers.size ? 'Streaming — reconnecting to the signalling server…' : 'Reconnecting…');
+    setNet('warn', viewers.size ? 'Streaming, reconnecting to the signalling server…' : 'Reconnecting…');
     retrySignalling();
   });
   p.on('error', (err) => {
@@ -478,19 +609,20 @@ function startPeer(code = savedCode() || randomCode()) {
       if (p.destroyed && !viewers.size && ++idTakenTries > 8) {
         idTakenTries = 0;
         try { localStorage.removeItem('vt-code'); } catch {}
-        setNet('warn', `Code ${code} is used by someone else — getting a new one…`);
+        setNet('warn', `Code ${code} is used by someone else, getting a new one…`);
         startPeer(randomCode());
         return;
       }
-      setNet('warn', `Code ${code} is still registered from before — retrying…`);
+      setNet('warn', `Code ${code} is still registered from before, retrying…`);
       retrySignalling();
       return;
     }
-    if (!viewers.size) setNet('bad', 'Signalling server unreachable — retrying…');
+    if (!viewers.size) setNet('bad', 'Signalling server unreachable, retrying…');
     if (p.destroyed || p.disconnected) retrySignalling();
   });
 }
-startPeer();
+startPeer(DEV_CODE || undefined); // dev: the code `npm run dev` gave both windows
+if (IS_DEV) document.body.classList.add('dev');
 
 function dropViewer(id) {
   const v = viewers.get(id);
@@ -512,10 +644,11 @@ setInterval(() => {
 
 /** Send a viewer's grab to everyone else. */
 function relayGrab(fromId, msg) {
+  toOutput(msg);
   for (const [id, v] of viewers) if (id !== fromId && v.model?.open) { try { v.model.send(msg); } catch {} }
 }
 function setViewerGrab(on) {
-  broadcastControl({ t: 'perm', grab: on });
+  broadcastControl({ t: 'perm', grab: on, pat: !!settings.viewerPat });
   if (!on) for (const v of viewers.values()) {
     if (!stage.grabs.has('v' + v.n)) continue;
     stage.setGrab('v' + v.n, -1, null);
@@ -523,7 +656,38 @@ function setViewerGrab(on) {
   }
 }
 
+// ---- camera output window (for OBS / a virtual camera): mirrors what viewers get, locally ----
+const outCh = new BroadcastChannel('vt-output');
+let outputOpen = false;
+const toOutput = (msg) => { if (outputOpen) { try { outCh.postMessage(msg); } catch {} } };
+outCh.onmessage = async ({ data: d }) => {
+  if (d?.t === 'hello') {
+    outputOpen = true;
+    if (modelBuf) outCh.postMessage({ t: 'model', id: modelId, buf: modelBuf.slice(0) });
+    outCh.postMessage({ t: 'view', ...view });
+    outCh.postMessage({ t: 'style', ...style });
+    outCh.postMessage({ t: 'props', list: publicProps() });
+    showOutputState(true);
+  }
+  if (d?.t === 'need-prop') { const blob = await getPropImage(String(d.hash)); if (blob) outCh.postMessage({ t: 'prop-img', hash: d.hash, blob }); }
+};
+function showOutputState(open) {
+  outputOpen = open;
+  $('outputBtn').textContent = open ? 'Close camera output' : 'Open camera output';
+  $('outputBtn').classList.toggle('on', open);
+}
+$('outputBtn').onclick = () => {
+  if (outputOpen) { window.vt.closeOutput(); showOutputState(false); return; }
+  const [w, h] = $('outputSize').value.split('x').map(Number);
+  settings.output = { bg: $('outputBg').value, size: $('outputSize').value }; saveSettings();
+  window.vt.openOutput({ w, h, bg: $('outputBg').value });
+};
+window.vt.onOutputClosed(() => showOutputState(false));
+if (settings.output) { $('outputBg').value = settings.output.bg; $('outputSize').value = settings.output.size; }
+$('outputBg').onchange = $('outputSize').onchange = () => { settings.output = { bg: $('outputBg').value, size: $('outputSize').value }; saveSettings(); if (outputOpen) $('outputBtn').click(), $('outputBtn').click(); };
+
 function broadcastControl(msg) {
+  toOutput(msg);
   for (const v of viewers.values()) if (v.model?.open) { try { v.model.send(msg); } catch {} }
 }
 
@@ -545,11 +709,22 @@ $('newCode').onclick = async () => {
   stopping = false;
   sigFailures = 0; idTakenTries = 0;
   try { localStorage.removeItem('vt-code'); } catch {}
-  $('code').textContent = '······';
+  showCode(null);
   setNet('warn', 'Getting a new code…');
   startPeer(randomCode());
 };
 window.vt.onAppClosing(async () => { await sayBye('ended'); window.vt.goodbyeSent(); });
+
+// an update released while you're broadcasting: say so (installing happens from the start screen)
+async function pollUpdate() {
+  try {
+    const r = await window.vt.checkUpdate();
+    if (r?.state === 'available') { $('updateVer').textContent = 'v' + r.latest; $('updatePill').hidden = false; }
+  } catch {}
+}
+setTimeout(pollUpdate, 30000);
+setInterval(pollUpdate, 30 * 60000);
+$('updateGo').onclick = () => $('stop').click();
 
 // What this viewer currently sees (reported by the viewer itself; older viewers don't report).
 function viewerSees(v) {
@@ -560,7 +735,7 @@ function viewerSees(v) {
   if (rx.s === 'error') return ['bad', 'Avatar failed to load', 'Their app couldn\'t open your model'];
   if (rx.s === 'hidden') return ['muted', 'Avatar hidden (you\'re not tracking)', 'Full screen hides your avatar after 30 s without tracking'];
   if (rx.s === 'ready') return ['ok', '● Sees you', 'Your avatar is on their screen'];
-  return ['muted', modelBuf ? 'Waiting for your avatar' : 'Waiting — load an avatar', ''];
+  return ['muted', modelBuf ? 'Waiting for your avatar' : 'Waiting for you to load an avatar', ''];
 }
 
 const MODE_LABEL = { floating: 'floating widget', window: 'window', screen: 'full screen' };
@@ -574,13 +749,13 @@ function updateViewers() {
   $('viewerCount').textContent = settings.maxViewers ? `(${live.length} / ${settings.maxViewers})` : live.length ? `(${live.length})` : '';
   const box = $('viewers');
   box.classList.toggle('muted', !live.length);
-  if (!live.length) box.textContent = 'Nobody yet — share the code.';
+  if (!live.length) box.textContent = 'Nobody yet. Share the code.';
   else {
     box.innerHTML = '';
     for (const [id, v] of live) {
       const row = document.createElement('div');
       row.className = 'vrow';
-      const extra = v.state ? ` — ${MODE_LABEL[v.state.mode] || v.state.mode}${v.state.sharing ? ', sharing screen' : ''}` : '';
+      const extra = v.state ? `, ${MODE_LABEL[v.state.mode] || v.state.mode}${v.state.sharing ? ', sharing screen' : ''}` : '';
       const label = document.createElement('span');
       label.className = 'vlabel';
       label.textContent = viewerLabel(v) + extra;
@@ -599,7 +774,7 @@ function updateViewers() {
       box.appendChild(row);
     }
   }
-  if (peer?.open) setNet('ok', live.length ? 'Online — streaming' : 'Online — waiting for viewers');
+  if (peer?.open) setNet('ok', live.length ? 'Online, streaming' : 'Online, waiting for viewers');
   refreshViewerSelect();
 }
 
@@ -613,6 +788,16 @@ function onViewerMessage(id, v, d) {
   v.lastHeard = performance.now();
   if (!d || typeof d !== 'object') return;
   if (d.t === 'bye') { dropViewer(id); return; }
+  if (d.t === 'fx') { // a viewer's headpat / boop
+    if (!settings.viewerPat || (d.k !== 'pat' && d.k !== 'boop')) return;
+    const now = performance.now();
+    if (d.k === 'boop' && now - (v.lastBoop || 0) < 250) return; // no machine-gun boops
+    if (d.k === 'boop') v.lastBoop = now;
+    const r = Number.isFinite(+d.r) ? +d.r : undefined; // pat speed
+    if (d.k === 'pat') stage.fx.patting(r); else stage.fx.boop();
+    relayGrab(id, { t: 'fx', k: d.k, r });
+    return;
+  }
   if (d.t === 'grab') {
     if (!settings.viewerGrab) return;
     const j = Number.isInteger(d.j) ? d.j : -1;
@@ -632,11 +817,12 @@ function onViewerMessage(id, v, d) {
     zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, work: d.work || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null,
   };
   if (d.pos && !v.dragging) v.pos = { ...DEFAULT_POS, ...d.pos };
+  if (!v.pos.tb) { toFullArea(v); sendPos(v, true); }
   if (first) {
     v.model.send({ t: 'props', list: publicProps() });
     v.model.send({ t: 'view', ...view });
     v.model.send({ t: 'style', ...style });
-    v.model.send({ t: 'perm', grab: !!settings.viewerGrab });
+    v.model.send({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat });
     offerModel(v);
   }
   updateViewers();
@@ -678,7 +864,7 @@ async function sendModel(conn) {
   conn.send({ t: 'model-end', id });
 }
 
-$('copy').onclick = () => { window.vt.copyText($('code').textContent); $('copy').textContent = 'Copied'; setTimeout(() => ($('copy').textContent = 'Copy'), 1200); };
+$('copy').onclick = () => { if (!shownCode) return; window.vt.copyText(shownCode); $('copy').textContent = 'Copied'; setTimeout(() => ($('copy').textContent = 'Copy'), 1200); };
 
 // ---------------- placement on the viewer's screen ----------------
 let selectedViewer = null;
@@ -704,20 +890,78 @@ function refreshViewerSelect() {
 $('viewerSel').onchange = () => { selectedViewer = $('viewerSel').value; renderPlacement(); };
 
 const FULL_AREA = { x: 0, y: 0, w: 1, h: 1 };
-// Let the avatar use the taskbar's strip too (e.g. the viewer watches a full-screen video, where the
-// taskbar is hidden and an avatar parked above it would float over nothing). Switching keeps the
-// avatar where it is on their screen: its position is re-expressed in the new area.
-$('overTaskbar').onchange = () => {
-  const v = viewers.get(selectedViewer);
-  if (!v?.state) return;
-  const tb = $('overTaskbar').checked;
-  const from = effectiveZone(v.state.zone, v.pos.tb ? FULL_AREA : v.state.work);
-  const to = effectiveZone(v.state.zone, tb ? FULL_AREA : v.state.work);
+// The avatar may go anywhere in the viewer's zone, taskbar included (when they watch something full
+// screen the taskbar is hidden, and an avatar parked above it would float over nothing). Dragging its
+// feet near the top of the taskbar snaps them onto it; keep pushing to go past.
+// Positions are expressed in the whole zone (pos.tb = true); older viewers' positions (relative to
+// the zone minus the taskbar) are converted so the avatar stays where it is on their screen.
+function toFullArea(v) {
+  if (v.pos.tb || !v.state) return;
+  const from = effectiveZone(v.state.zone, v.state.work), to = effectiveZone(v.state.zone, FULL_AREA);
   const ax = from.x + v.pos.x * from.w, ay = from.y + v.pos.y * from.h, ah = v.pos.s * from.h;
-  v.pos = { ...v.pos, tb, x: (ax - to.x) / to.w, y: (ay - to.y) / to.h, s: ah / to.h };
-  renderPlacement(); // lays the zone out for the new area first…
-  updatePos(v, {});  // …then clamps (back above the taskbar when switching off) and sends
-};
+  v.pos = { ...v.pos, tb: true, x: (ax - to.x) / to.w, y: (ay - to.y) / to.h, s: ah / to.h };
+}
+/** The taskbar's top edge as a y position in the zone (where feet snap), or null if it has none there. */
+function taskbarSnapY(v) {
+  if (!v?.state) return null;
+  const z = effectiveZone(v.state.zone, FULL_AREA), w = v.state.work;
+  const top = w.y + w.h; // bottom of the usable area = top of a bottom taskbar
+  if (top > 0.995) return null;
+  const y = (top - z.y) / z.h;
+  return y > 0.05 && y < 1 ? y : null;
+}
+const SNAP_PX = 14; // how close (in the placement view) the feet must come to stick
+
+// props placed on the viewer's screen: shown and dragged here (fractions of their whole monitor)
+const screenPropEls = new Map(); // id → <img>
+function renderScreenProps() {
+  const box = $('screenBox');
+  const list = props.filter((p) => p.attach === 'screen');
+  for (const [id, el] of screenPropEls) if (!list.some((p) => p.id === id)) { el.remove(); screenPropEls.delete(id); }
+  for (const d of list) {
+    let el = screenPropEls.get(d.id);
+    if (!el) {
+      el = document.createElement('img');
+      el.className = 'sprop'; el.draggable = false; el.dataset.id = d.id;
+      getPropImage(d.img).then((b) => { if (b) el.src = propThumbs.get(d.img) || (propThumbs.set(d.img, URL.createObjectURL(b)), propThumbs.get(d.img)); });
+      el.addEventListener('pointerdown', (e) => {
+        const p = props.find((x) => x.id === d.id);
+        if (e.button !== 0 || p.locked || propsLocked) return;
+        e.preventDefault(); e.stopPropagation(); el.setPointerCapture(e.pointerId);
+        selectProp(d.id);
+        const r = box.getBoundingClientRect();
+        el._drag = { x: e.clientX, y: e.clientY, sx: p.pos[0], sy: p.pos[1], w: r.width, h: r.height };
+      });
+      el.addEventListener('pointermove', (e) => {
+        const g = el._drag; if (!g) return;
+        const x = Math.max(0, Math.min(1, g.sx + (e.clientX - g.x) / g.w)), y = Math.max(0, Math.min(1, g.sy + (e.clientY - g.y) / g.h));
+        updateProp(d.id, { pos: [+x.toFixed(4), +y.toFixed(4), 0] });
+      });
+      const end = () => { el._drag = null; };
+      el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+      el.addEventListener('wheel', (e) => {
+        const p = props.find((x) => x.id === d.id);
+        if (p.locked || propsLocked) return;
+        e.preventDefault(); e.stopPropagation(); selectProp(d.id);
+        updateProp(d.id, { size: Math.max(0.02, Math.min(1.5, p.size * ((e.deltaY || e.deltaX) < 0 ? 1.08 : 1 / 1.08))) });
+      }, { passive: false });
+      box.appendChild(el);
+      screenPropEls.set(d.id, el);
+    }
+    Object.assign(el.style, screenPropStyle(d, 100, 100, '%', props.length - props.indexOf(d)));
+    el.hidden = !d.visible;
+    el.classList.toggle('sel', d.id === selectedProp);
+    el.classList.toggle('locked', !!(d.locked || propsLocked));
+  }
+}
+/** CSS for a screen prop in a W×H area (also used by the viewer, same maths). */
+function screenPropStyle(d, W, H, unit, rank) {
+  return {
+    left: d.pos[0] * W + unit, top: d.pos[1] * H + unit, height: d.size * H + unit,
+    transform: `translate(-50%, -50%) scaleX(${d.flip ? -1 : 1})`,
+    zIndex: (d.draw === 'back' ? 100 : 300) + rank, // behind (100s) or above (300s) the avatar box (200)
+  };
+}
 
 function zoneRectPx() {
   const zb = $('zoneBox');
@@ -763,21 +1007,18 @@ function renderPlacement() {
   for (const b of bars) {
     const el = document.createElement('div');
     el.className = 'taskbar';
-    el.textContent = v.pos.tb ? 'taskbar — avatar can go over it' : 'taskbar';
+    el.textContent = 'taskbar';
     Object.assign(el.style, { left: b.left + '%', top: b.top + '%', width: b.width + '%', height: b.height + '%' });
     $('screenBox').insertBefore(el, $('zoneBox'));
   }
-  const z = effectiveZone(v.state.zone, v.pos.tb ? FULL_AREA : wk), zb = $('zoneBox').style;
-  $('overTaskbar').checked = !!v.pos.tb;
-  $('overTaskbarRow').hidden = !bars.length;
-  $('screenBox').classList.toggle('overTb', !!v.pos.tb);
+  const z = effectiveZone(v.state.zone, FULL_AREA), zb = $('zoneBox').style;
   zb.left = z.x * 100 + '%'; zb.top = z.y * 100 + '%'; zb.width = z.w * 100 + '%'; zb.height = z.h * 100 + '%';
 
   const vid = $('screenVid');
   if (vid.srcObject !== (v.stream || null)) vid.srcObject = v.stream || null;
   $('noVideo').hidden = !!v.stream;
   $('noVideo').innerHTML = v.state.sharing ? 'Connecting to screen preview…'
-    : 'Screen preview is off.<br>Your friend can turn it on from their tray icon — until then you\'re placing the avatar on a blank outline of their monitor.';
+    : 'Screen preview is off.<br>Your friend can turn it on from their tray icon. Until then you\'re placing the avatar on a blank outline of their monitor.';
 
   const zp = zoneRectPx();
   const p = clampPos(v.pos, zp);
@@ -786,6 +1027,7 @@ function renderPlacement() {
   ab.left = p.x * zp.w - boxW / 2 + 'px'; ab.top = p.y * zp.h - boxH + 'px';
   ab.width = boxW + 'px'; ab.height = boxH + 'px';
   $('avName').textContent = modelName || 'Avatar';
+  renderScreenProps();
 }
 new ResizeObserver(() => renderPlacement()).observe($('stageWrap'));
 
@@ -819,9 +1061,16 @@ $('avBox').addEventListener('pointermove', (e) => {
   if (!drag) return;
   const zp = zoneRectPx(), dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   if (drag.resize) updatePos(drag.v, { s: drag.start.s + Math.max(-dy / zp.h, dx / zp.h / AVATAR_ASPECT * 2) });
-  else updatePos(drag.v, { x: drag.start.x + dx / zp.w, y: drag.start.y + dy / zp.h });
+  else {
+    let y = drag.start.y + dy / zp.h;
+    const snap = taskbarSnapY(drag.v);
+    drag.snapped = snap !== null && Math.abs(y - snap) * zp.h < SNAP_PX;
+    if (drag.snapped) y = snap;
+    $('avBox').classList.toggle('snapped', drag.snapped);
+    updatePos(drag.v, { x: drag.start.x + dx / zp.w, y });
+  }
 });
-const endDrag = () => { if (!drag) return; drag.v.dragging = false; sendPos(drag.v, true); drag = null; $('avBox').classList.remove('dragging'); };
+const endDrag = () => { if (!drag) return; drag.v.dragging = false; sendPos(drag.v, true); drag = null; $('avBox').classList.remove('dragging', 'snapped'); };
 $('avBox').addEventListener('pointerup', endDrag);
 $('avBox').addEventListener('pointercancel', endDrag);
 $('screenArea').addEventListener('wheel', (e) => {
@@ -830,7 +1079,9 @@ $('screenArea').addEventListener('wheel', (e) => {
   e.preventDefault();
   updatePos(v, { s: v.pos.s * (e.deltaY < 0 ? 1.06 : 1 / 1.06) });
 }, { passive: false });
-$('resetPos').onclick = () => { const v = viewers.get(selectedViewer); if (v) updatePos(v, { ...DEFAULT_POS }); };
+$('placeAdd').onclick = () => $('placeFile').click();
+$('placeFile').onchange = async () => { for (const f of $('placeFile').files) await addPropFile(f, { onScreen: true }); $('placeFile').value = ''; };
+$('resetPos').onclick = () => { const v = viewers.get(selectedViewer); if (v) updatePos(v, { ...DEFAULT_POS, tb: true, y: taskbarSnapY(v) ?? 1 }); };
 
 // ---------------- props (2D images in the scene or on the model) ----------------
 // Defs are what viewers receive (see shared/props.js). File names stay on this computer.
@@ -858,11 +1109,14 @@ async function getPropImage(hash) {
 }
 stage.props.setLoader(getPropImage);
 
-const publicProps = () => props.map(({ id, img, attach, pos, rot, size, face, flip, visible }) => ({ id, img, attach, pos, rot, size, face, flip, visible }));
+// what viewers get: everything that affects the picture (not labels, locks or groups, those stay here)
+const publicProps = () => props.map(({ id, img, attach, pos, rot, rx, ry, size, face, flip, visible, w, fp, fr, draw }) =>
+  ({ id, img, attach, pos, rot, rx, ry, size, face, flip, visible, w, fp, fr, draw }));
 
 let propPersistTimer = null, propSendTimer = null;
 function commitProps({ rebuild = true } = {}) {
   stage.props.sync(props);
+  renderScreenProps();
   stage.props.setSelected(selectedProp);
   if (rebuild) renderPropList(); else syncPropInputs();
   clearTimeout(propPersistTimer);
@@ -882,11 +1136,12 @@ function selectProp(id) {
   selectedProp = id;
   stage.props.setSelected(id);
   document.querySelectorAll('#propList .prop').forEach((r) => r.classList.toggle('sel', r.dataset.id === id));
+  for (const [pid, el] of screenPropEls) el.classList.toggle('sel', pid === id);
 }
 
-async function addPropFile(file) {
+async function addPropFile(file, { onScreen = false } = {}) {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) return;
-  if (file.size > 20 * 1024 * 1024) { alert(`${file.name} is over 20 MB — please use a smaller image.`); return; }
+  if (file.size > 20 * 1024 * 1024) { alert(`${file.name} is over 20 MB. Please use a smaller image.`); return; }
   const buf = await file.arrayBuffer();
   const hash = await hashId(buf);
   const blob = new Blob([buf], { type: file.type });
@@ -901,10 +1156,13 @@ async function addPropFile(file) {
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion), up = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
   const n = props.length % 5;
   const p0 = centre.addScaledVector(right, vis * (0.3 - n * 0.04)).addScaledVector(up, vis * (0.15 - n * 0.06));
-  props.push({ id, img: hash, attach: 'scene', pos: p0.toArray().map((v) => +v.toFixed(3)), rot: 0, size: +(vis * 0.22).toFixed(3), face: false, flip: false, visible: true });
+  props.push(normalizeProp(onScreen
+    ? { id, img: hash, attach: 'screen', pos: [+(0.5 + n * 0.04).toFixed(3), +(0.4 + n * 0.04).toFixed(3), 0], size: 0.18, flip: false, visible: true, draw: 'front' }
+    : { id, img: hash, attach: 'scene', pos: p0.toArray().map((v) => +v.toFixed(3)), size: +(vis * 0.22).toFixed(3), face: false, flip: false, visible: true, draw: 'front' }));
   propLabels[id] = file.name.replace(/\.[a-z0-9]+$/i, '');
   selectedProp = id;
   commitProps();
+  if (onScreen) renderPlacement();
 }
 
 async function removeProp(id) {
@@ -920,34 +1178,57 @@ async function removeProp(id) {
 
 $('addProp').onclick = () => $('propFile').click();
 $('propFile').onchange = async () => { for (const f of $('propFile').files) await addPropFile(f); $('propFile').value = ''; };
-window.addEventListener('drop', async (e) => { for (const f of e.dataTransfer.files) if (f.type.startsWith('image/')) await addPropFile(f); });
+// images dropped while placing things on the viewer's screen go onto their screen
+window.addEventListener('drop', async (e) => { for (const f of e.dataTransfer.files) if (f.type.startsWith('image/')) await addPropFile(f, { onScreen: !$('placeView').hidden }); });
 
 const LOG2 = (v) => Math.log2(Math.max(0.02, v));
+const DEG = 180 / Math.PI;
+// prop groups: one hotkey shows / hides every prop of a group
+const groupNames = () => [...new Set(props.map((p) => p.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+function toggleGroup(name) {
+  const members = props.filter((p) => p.group === name);
+  const show = !members.some((p) => p.visible); // any shown → hide all; all hidden → show all
+  for (const p of members) p.visible = show;
+  commitProps({ rebuild: false });
+}
 function renderPropList() {
   const list = $('propList');
   list.innerHTML = '';
   $('propDrop').style.display = props.length ? 'none' : '';
+  $('groupList').innerHTML = groupNames().map((g) => `<option value="${g.replace(/"/g, '&quot;')}">`).join('');
+  // newest / front-most first reads more naturally; the array itself is in paint order (first = back)
   props.forEach((d, i) => {
     let thumb = propThumbs.get(d.img);
     if (!thumb && propImgs.get(d.img)) { thumb = URL.createObjectURL(propImgs.get(d.img)); propThumbs.set(d.img, thumb); }
     const row = document.createElement('div');
     row.className = 'prop' + (d.id === selectedProp ? ' sel' : '');
     row.dataset.id = d.id;
+    const attached = d.attach !== 'scene';
     row.innerHTML = `
       <div class="top"><img alt="">
         <span class="nm"></span>
+        <span class="arrows"><button data-a="up" title="Bring forward (higher in the list = drawn in front)" ${i === 0 ? 'disabled' : ''}>▲</button><button data-a="down" title="Send back" ${i === props.length - 1 ? 'disabled' : ''}>▼</button></span>
         <button data-a="lock" title="Lock: can't be moved in the preview by accident"></button>
         <button data-a="vis" title="Show / hide"></button>
         <button data-a="hk" class="hk"></button>
         <button data-a="del" title="Remove">✕</button></div>
       <div class="more">
         <select data-k="attach">${PROP_ATTACH.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+        <div class="hint muted onscreen" ${d.attach === 'screen' ? '' : 'hidden'} style="margin:4px 0">Shown on full-screen viewers' monitors, anywhere you like, always facing them: move it in <b>Place on viewer's screen</b>.</div>
+        <div class="follow" ${attached && d.attach !== 'screen' ? '' : 'hidden'}>
+          <div class="slider" title="1 = moves exactly with that body part · 0.5 = halfway · 0 = stays where it is at rest"><span>Follow strength</span><input type="range" data-k="w" min="0" max="1" step="0.05"></div>
+          <label class="toggle" title="Off: it turns with the body part but doesn't travel with it">Follow its position <input type="checkbox" data-k="fp"></label>
+          <label class="toggle" title="Off: it travels with the body part but keeps its own angle">Follow its rotation <input type="checkbox" data-k="fr"></label>
+        </div>
+        <div class="slider" title="Behind / in front of the avatar, or by its real distance (then it can go e.g. between an arm and the body). Among props drawn the same way, higher in this list = in front."><span>Draw</span><select data-k="draw">${DRAW_MODES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
         <label class="toggle">Always face the camera <input type="checkbox" data-k="face"></label>
         <label class="toggle">Mirror image <input type="checkbox" data-k="flip"></label>
         <div class="slider"><span>Size</span><input type="range" data-k="size" min="-5" max="2" step="0.01"></div>
-        <div class="slider"><span>Rotation</span><input type="range" data-k="rot" min="-180" max="180" step="1"></div>
-        <div class="slider"><span>Depth</span><input type="range" data-k="z" min="-1" max="1" step="0.01" title="Toward the camera (right) or behind the avatar (left)"></div>
-        <div class="row" style="margin-top:4px"><button data-a="up" ${i === props.length - 1 ? 'disabled' : ''}>Bring forward</button><button data-a="down" ${i === 0 ? 'disabled' : ''}>Send back</button></div>
+        <div class="slider"><span>Rotate (flat)</span><input type="range" data-k="rot" min="-180" max="180" step="1"></div>
+        <div class="slider" title="Tilt toward / away from the camera"><span>Tilt ↕</span><input type="range" data-k="rx" min="-180" max="180" step="1"></div>
+        <div class="slider" title="Turn left / right"><span>Turn ↔</span><input type="range" data-k="ry" min="-180" max="180" step="1"></div>
+        <div class="slider" title="How far it is: toward the camera (right) or behind the avatar (left)"><span>Distance</span><input type="range" data-k="z" min="-1" max="1" step="0.01"></div>
+        <div class="slider" title="Props in the same group share one show / hide hotkey (see Groups below)"><span>Group</span><input type="text" data-k="group" list="groupList" placeholder="none" maxlength="24"></div>
       </div>`;
     if (thumb) row.querySelector('img').src = thumb;
     else getPropImage(d.img).then((b) => { if (b) { const u = URL.createObjectURL(b); propThumbs.set(d.img, u); row.querySelector('img').src = u; } });
@@ -958,22 +1239,51 @@ function renderPropList() {
     row.querySelector('[data-a=lock]').onclick = () => { updateProp(d.id, { locked: !d.locked }); if (d.locked && selectedProp === d.id) selectProp(null); };
     row.querySelector('[data-a=hk]').onclick = () => bindHotkey('prop:' + d.id, `Hotkey to show / hide “${propLabels[d.id] || 'prop'}”`);
     row.querySelector('[data-a=del]').onclick = () => removeProp(d.id);
-    row.querySelector('[data-a=up]').onclick = () => { props.splice(i, 1); props.splice(i + 1, 0, d); commitProps(); };
-    row.querySelector('[data-a=down]').onclick = () => { props.splice(i, 1); props.splice(i - 1, 0, d); commitProps(); };
+    row.querySelector('[data-a=up]').onclick = () => { props.splice(i, 1); props.splice(i - 1, 0, d); commitProps(); };
+    row.querySelector('[data-a=down]').onclick = () => { props.splice(i, 1); props.splice(i + 1, 0, d); commitProps(); };
+    row.querySelector('[data-k=draw]').onchange = (e) => { updateProp(d.id, { draw: e.target.value }); renderPlacement(); };
+    // changing what it hangs from (or how it follows) keeps the prop where it is on screen
+    const keepPlace = (patch) => updateProp(d.id, { ...patch, pos: stage.props.posKeepingPlace(d.id, patch) || d.pos }, { rebuild: 'attach' in patch });
     row.querySelector('[data-k=attach]').onchange = (e) => {
       const attach = e.target.value;
-      const pos = stage.props.posKeepingPlace(d.id, attach) || (attach === 'scene' ? [0.35, 1.35, 0.1] : [0, 0.1, 0.1]);
-      updateProp(d.id, { attach, pos });
+      // to / from the viewer's screen: positions mean something else there, start somewhere sensible
+      if (attach === 'screen') return updateProp(d.id, { attach, pos: [0.5, 0.4, 0], size: 0.18 }, { rebuild: true }), renderPlacement();
+      if (d.attach === 'screen') return updateProp(d.id, { attach, pos: attach === 'scene' ? [0.35, 1.35, 0.1] : [0, 0.1, 0.1], size: 0.2 }, { rebuild: true }), renderPlacement();
+      keepPlace({ attach });
     };
+    row.querySelector('[data-k=w]').oninput = (e) => keepPlace({ w: Number(e.target.value) });
+    row.querySelector('[data-k=fp]').onchange = (e) => keepPlace({ fp: e.target.checked });
+    row.querySelector('[data-k=fr]').onchange = (e) => keepPlace({ fr: e.target.checked });
     row.querySelector('[data-k=face]').onchange = (e) => updateProp(d.id, { face: e.target.checked });
     row.querySelector('[data-k=flip]').onchange = (e) => updateProp(d.id, { flip: e.target.checked });
     row.querySelector('[data-k=size]').oninput = (e) => updateProp(d.id, { size: 2 ** Number(e.target.value) });
-    row.querySelector('[data-k=rot]').oninput = (e) => updateProp(d.id, { rot: -Number(e.target.value) * Math.PI / 180 });
+    row.querySelector('[data-k=rot]').oninput = (e) => updateProp(d.id, { rot: -Number(e.target.value) / DEG });
+    row.querySelector('[data-k=rx]').oninput = (e) => updateProp(d.id, { rx: Number(e.target.value) / DEG });
+    row.querySelector('[data-k=ry]').oninput = (e) => updateProp(d.id, { ry: Number(e.target.value) / DEG });
     row.querySelector('[data-k=z]').oninput = (e) => updateProp(d.id, { pos: [d.pos[0], d.pos[1], Number(e.target.value)] });
+    row.querySelector('[data-k=group]').onchange = (e) => { updateProp(d.id, { group: e.target.value.trim() || null }, { rebuild: true }); applyHotkeys(); };
     list.appendChild(row);
   });
+  renderGroups();
   syncPropInputs();
   refreshHotkeyBadges();
+}
+function renderGroups() {
+  const names = groupNames(), box = $('propGroups');
+  box.hidden = !names.length;
+  box.querySelector('.list').innerHTML = '';
+  for (const g of names) {
+    const members = props.filter((p) => p.group === g);
+    const row = document.createElement('div');
+    row.className = 'grow'; row.dataset.group = g;
+    row.innerHTML = `<span class="gname"></span><span class="muted"> · ${members.length}</span>
+      <button data-a="gvis"></button><button data-a="ghk" class="hk"></button>`;
+    row.querySelector('.gname').textContent = g;
+    row.querySelector('[data-a=gvis]').textContent = members.some((p) => p.visible) ? 'Hide all' : 'Show all';
+    row.querySelector('[data-a=gvis]').onclick = () => { toggleGroup(g); renderGroups(); };
+    row.querySelector('[data-a=ghk]').onclick = () => bindHotkey('group:' + g, `Hotkey to show / hide every prop in “${g}”`);
+    box.querySelector('.list').appendChild(row);
+  }
 }
 function syncPropInputs() {
   document.querySelectorAll('#propList .prop').forEach((row) => {
@@ -983,9 +1293,21 @@ function syncPropInputs() {
     row.querySelector('[data-a=lock]').textContent = d.locked ? '🔒' : '🔓';
     row.querySelector('[data-a=lock]').classList.toggle('on', !!d.locked);
     row.style.opacity = d.visible ? '' : '.6';
-    const set = (k, v) => { const el = row.querySelector(`[data-k=${k}]`); if (el && document.activeElement !== el) { if (el.type === 'checkbox') el.checked = v; else el.value = v; } };
+    const set = (k, v) => { const el = row.querySelector(`[data-k=${k}]`); if (el && document.activeElement !== el) { if (el.type === 'checkbox') el.checked = v; else if (el.tagName === 'B') el.textContent = v; else el.value = v; } };
     set('attach', d.attach); set('face', !!d.face); set('flip', !!d.flip);
-    set('size', LOG2(d.size)); set('rot', Math.round(-(d.rot || 0) * 180 / Math.PI)); set('z', d.pos[2]);
+    set('w', d.w); set('fp', d.fp); set('fr', d.fr); set('draw', d.draw); set('group', d.group || '');
+    set('size', LOG2(d.size)); set('rot', Math.round(-(d.rot || 0) * DEG)); set('rx', Math.round(d.rx * DEG)); set('ry', Math.round(d.ry * DEG)); set('z', d.pos[2]);
+    row.querySelector('.follow').hidden = d.attach === 'scene' || d.attach === 'screen';
+    const onScreen = d.attach === 'screen';
+    // screen props always face the viewer: no rotation / facing settings; distance only matters "by distance"
+    row.querySelector('[data-k=z]').closest('.slider').hidden = onScreen || d.draw !== 'depth';
+    row.querySelector('[data-k=face]').closest('label').hidden = onScreen;
+    for (const k of ['rot', 'rx', 'ry']) row.querySelector(`[data-k=${k}]`).closest('.slider').hidden = onScreen;
+    row.querySelector('[data-k=draw] option[value=depth]').hidden = onScreen;
+  });
+  document.querySelectorAll('#propGroups .grow').forEach((row) => {
+    const members = props.filter((p) => p.group === row.dataset.group);
+    row.querySelector('[data-a=gvis]').textContent = members.some((p) => p.visible) ? 'Hide all' : 'Show all';
   });
 }
 
@@ -1051,7 +1373,7 @@ window.addEventListener('keydown', (e) => {
 
 (async () => {
   const saved = await idbGet('props');
-  if (saved?.list?.length) { props = saved.list; propLabels = saved.labels || {}; commitProps(); applyHotkeys(); }
+  if (saved?.list?.length) { props = saved.list.map(normalizeProp); propLabels = saved.labels || {}; commitProps(); applyHotkeys(); }
   else renderPropList();
 })();
 
@@ -1263,6 +1585,9 @@ function buildFrame(result, nowMs) {
     for (const i of MOUTH_IDX) b[i] = Math.min(1, b[i] * tune.mouth);
     for (const i of BLINK_IDX) b[i] = Math.min(1, b[i] * tune.blink);
   }
+  // hard limits (after every sensitivity): the mouth / eyelids never go past these
+  if (settings.mouthMax < 1) for (const i of MOUTH_IDX) b[i] = Math.min(settings.mouthMax, b[i]);
+  if (settings.blinkMax < 1) for (const i of BLINK_IDX) b[i] = Math.min(settings.blinkMax, b[i]);
 
   const frame = {
     t: 'm', f: true, x: activeExpr, ae: settings.autoExpr,
@@ -1290,6 +1615,31 @@ function buildFrame(result, nowMs) {
 let frameSeq = 0, lastArms = null;
 const armTracker = new ArmTracker(settings.armSmoothing);
 let paused = false, lastPausedSend = 0;
+// A black camera image (lens covered, camera switched off in hardware, lights off) means you're away:
+// the face is lost, but a pose held because you stepped out of frame is dropped too, so full-screen
+// viewers start their "away" countdown. Checked twice a second on a tiny copy of the frame.
+const blackCheck = { canvas: null, ctx: null, at: 0, since: 0, black: false };
+function cameraIsBlack(now) {
+  if (now - blackCheck.at < 500) return blackCheck.black;
+  blackCheck.at = now;
+  if (!blackCheck.canvas) {
+    blackCheck.canvas = document.createElement('canvas'); blackCheck.canvas.width = 32; blackCheck.canvas.height = 18;
+    blackCheck.ctx = blackCheck.canvas.getContext('2d', { willReadFrequently: true });
+  }
+  let max = 255;
+  try {
+    blackCheck.ctx.drawImage(video, 0, 0, 32, 18);
+    const px = blackCheck.ctx.getImageData(0, 0, 32, 18).data;
+    max = 0;
+    for (let i = 0; i < px.length; i += 4) { const l = px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11; if (l > max) max = l; }
+  } catch { return blackCheck.black; }
+  const dark = max < 22; // even the brightest pixel is nearly black
+  if (!dark) { blackCheck.since = 0; blackCheck.black = false; }
+  else if (!blackCheck.since) blackCheck.since = now;
+  else if (now - blackCheck.since > 1500) blackCheck.black = true;
+  return blackCheck.black;
+}
+
 function loop() {
   setTimeout(loop, 8);
   if (paused) {
@@ -1308,6 +1658,14 @@ function loop() {
   lastVideoTime = video.currentTime;
 
   const now = performance.now();
+  if (cameraIsBlack(now)) {
+    holding = false; lastGood = null; lastArms = null; prevQ = null;
+    const frame = { t: 'm', f: false, x: activeExpr, ae: settings.autoExpr };
+    stage.setMotion(frame);
+    if (lastFace !== 'black') { lastFace = 'black'; setTrack('warn', 'Camera image is black (counts as away)'); }
+    sendFrame(frame, now);
+    return;
+  }
   const frame = buildFrame(landmarker.detectForVideo(video, now), now);
   if (settings.arms && poseLandmarker && handLandmarker) {
     try {
@@ -1320,7 +1678,7 @@ function loop() {
   const state = frame.h ? 'hold' : frame.f;
   if (state !== lastFace) {
     lastFace = state;
-    if (state === 'hold') setTrack('warn', 'Out of view — holding your last pose');
+    if (state === 'hold') setTrack('warn', 'Out of view, holding your last pose');
     else setTrack(frame.f ? 'ok' : 'warn', frame.f ? 'Tracking' : 'No face detected');
   }
 
@@ -1331,6 +1689,7 @@ function sendFrame(frame, now, force = false) {
   if (force || now - lastSend >= SEND_INTERVAL_MS) {
     lastSend = now;
     frame.n = ++frameSeq; // lets viewers ignore frames that arrive late / out of order
+    toOutput(frame);
     for (const v of viewers.values()) {
       if (!v.motion?.open) continue;
       // a backed-up channel means the network can't keep up: drop this frame rather than queue it
@@ -1343,7 +1702,7 @@ function sendFrame(frame, now, force = false) {
 async function setPaused(on) {
   if (on === paused) return;
   paused = on;
-  $('pauseBtn').textContent = on ? '▶ Resume tracking' : '⏸ Pause tracking';
+  $('pauseBtn').textContent = on ? '▶︎ Resume tracking' : '⏸︎ Pause tracking';
   $('pauseBtn').classList.toggle('on', on);
   $('pausedBanner').hidden = !on;
   if (on) {
@@ -1353,7 +1712,7 @@ async function setPaused(on) {
   } else {
     filters.head.reset(); filters.face.reset(); prevQ = null; lastFace = null; lastGood = null; holding = false; lastArms = null; armTracker.reset();
     const ok = await openCamera();
-    // the tracking loop may already have found your face while the camera was starting —
+    // the tracking loop may already have found your face while the camera was starting,
     // only show "looking" if it hasn't (it updates the status itself as soon as it does)
     if (ok && lastFace === null) setTrack('warn', 'Looking for your face…');
   }

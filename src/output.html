@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VTOverlay Output</title>
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/",
+  "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+} }
+</script>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg, #00b140); cursor: default; }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #wait { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font: 14px system-ui, sans-serif; color: #fff; background: #000a; padding: 8px 14px; border-radius: 8px; }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="wait">Waiting for the broadcaster's avatar…</div>
+<script type="module" src="output.js"></script>
+</body>
+</html>

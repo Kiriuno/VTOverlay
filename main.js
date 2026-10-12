@@ -1,4 +1,4 @@
-// VTOverlay — main process
+// VTOverlay: main process
 //   * Sender   : webcam face tracking -> streams motion (numbers only, never video) to viewers
 //   * Receiver : shows the avatar in one of three ways (switchable while connected)
 //       - floating : small transparent always-on-top widget you can drag around
@@ -22,9 +22,30 @@ const PKG = require('./package.json');
 const APPLYING_UPDATE = updater.applyIfRequested();
 const RECEIVER_ONLY = !!PKG.vtReceiverOnly || process.argv.includes('--viewer');
 
+// Dev mode (npm run dev): a broadcaster and a viewer started together, already linked. Dev rooms use
+// their own name prefix, so a dev app and a released app can never find each other's rooms.
+const argVal = (k) => (process.argv.find((a) => a.startsWith(k + '=')) || '').slice(k.length + 1);
+const DEV = process.argv.includes('--vt-dev');
+const DEV_ROLE = argVal('--vt-dev-role');           // 'broadcast' | 'viewer'
+const DEV_CODE = argVal('--vt-dev-code').toUpperCase();
+const DEV_MODE = argVal('--vt-dev-mode') || 'window';
+if (DEV) app.setPath('userData', app.getPath('userData') + '-dev-' + (DEV_ROLE || 'app')); // separate settings per instance
+
+/** URL of one of our pages; dev instances tell every page they're in dev mode. */
+function pageUrl(name, params = {}) {
+  const q = new URLSearchParams(params);
+  if (DEV) {
+    q.set('dev', '1');
+    if (DEV_CODE) q.set('devcode', DEV_CODE);
+    if (process.env.VT_PEER_SERVER) q.set('peer', process.env.VT_PEER_SERVER); // e.g. {"host":"localhost","port":9000,"path":"/","secure":false}
+  }
+  const qs = q.toString();
+  return `app://local/src/${name}${qs ? '?' + qs : ''}`;
+}
+
 // Keep tracking, networking and heartbeats running at full speed when a window is in the background,
-// minimised, hidden in the tray or covered by another window (Chromium otherwise throttles timers —
-// down to once a minute after 5 minutes — and pauses animation frames for occluded windows).
+// minimised, hidden in the tray or covered by another window (Chromium otherwise throttles timers,
+// down to once a minute after 5 minutes, and pauses animation frames for occluded windows).
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
@@ -50,9 +71,15 @@ let overlayWin = null; // receiver avatar window
 let panelWin = null;   // receiver control window (taskbar entry for floating / screen modes)
 let tray = null;
 let quitting = false;
-let transitioning = 0; // >0 while we swap windows (mode switch, disconnect) — don't quit then
+let transitioning = 0; // >0 while we swap windows (mode switch, disconnect), don't quit then
 // receiver state (survives mode switches)
+// small viewer preferences that outlive a session
+const prefsFile = () => path.join(app.getPath('userData'), 'prefs.json');
+function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf8')); } catch { return {}; } }
+function writePrefs(patch) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...patch })); } catch {} }
+
 const rx = {
+  interact: null, // viewer allows interacting with the avatar (pull hair, headpat, boop), read from prefs
   code: '', name: '', mode: 'floating', displayId: null, share: false,
   locked: true, editingZone: false, sharing: false, status: { state: 'warn', text: 'Connecting…' },
 };
@@ -119,7 +146,7 @@ async function quitApp() {
 }
 
 // X button: launcher/sender windows quit (saying bye first);
-// receiver windows (control window, window-mode avatar) hide to the tray — only Quit quits.
+// receiver windows (control window, window-mode avatar) hide to the tray, only Quit quits.
 let trayHintShown = false;
 function guardClose(win, hideToTray) {
   win.on('close', (e) => {
@@ -159,7 +186,7 @@ function showLauncher() {
   if (mainWin && !mainWin.isDestroyed()) {
     mainWin.setSize(560, RECEIVER_ONLY ? 700 : 820);
     mainWin.center();
-    mainWin.loadURL('app://local/src/launcher.html');
+    mainWin.loadURL(pageUrl('launcher.html'));
     mainWin.show();
     return;
   }
@@ -167,7 +194,7 @@ function showLauncher() {
     width: 560, height: RECEIVER_ONLY ? 700 : 820, title: RECEIVER_ONLY ? 'VTOverlay Viewer' : 'VTOverlay',
     backgroundColor: '#14121a', autoHideMenuBar: true,
   });
-  mainWin.loadURL('app://local/src/launcher.html');
+  mainWin.loadURL(pageUrl('launcher.html'));
   mainWin.on('closed', () => { mainWin = null; });
 }
 
@@ -176,6 +203,7 @@ ipcMain.handle('get-config', () => ({
   displays: displayList(),
   version: PKG.version,
   justUpdated: process.argv.includes('--vt-updated'),
+  updateFailed: process.argv.includes('--vt-update-failed'),
   autoUpdate: takeAutoUpdate(), // true only for the first start screen of this launch
   repo: updater.REPO,
 }));
@@ -211,16 +239,17 @@ ipcMain.on('open-external', (_e, url) => {
 function displayList() {
   const primary = screen.getPrimaryDisplay().id;
   return screen.getAllDisplays().map((d, i) => ({
-    id: d.id, label: `Screen ${i + 1} — ${d.size.width}×${d.size.height}${d.id === primary ? ' (main)' : ''}`,
+    id: d.id, label: `Screen ${i + 1}, ${d.size.width}×${d.size.height}${d.id === primary ? ' (main)' : ''}`,
   }));
 }
 
-ipcMain.handle('start-sender', () => {
+ipcMain.handle('start-sender', () => startSenderPage());
+function startSenderPage() {
   if (!mainWin || RECEIVER_ONLY) return;
   mainWin.setSize(1180, 760);
   mainWin.center();
-  mainWin.loadURL('app://local/src/sender.html');
-});
+  mainWin.loadURL(pageUrl('sender.html'));
+}
 
 // Global hotkeys for the broadcaster (expressions, props). They work while another app has focus.
 // The page sends the full list [{ accel, id }]; we register them and report which ones failed
@@ -243,7 +272,23 @@ function setSenderHotkeys(list) {
 ipcMain.handle('set-hotkeys', (_e, list) => setSenderHotkeys(list));
 
 // sender page already said bye to its viewers
-ipcMain.on('back-to-menu', () => { setSenderHotkeys([]); showLauncher(); });
+ipcMain.on('back-to-menu', () => { setSenderHotkeys([]); closeOutput(); showLauncher(); });
+
+// Camera output: a plain window with just the avatar on a solid background, for OBS window capture
+// (→ chroma key → OBS Virtual Camera, which Discord & co. see as a webcam).
+let outputWin = null;
+function closeOutput() { if (outputWin && !outputWin.isDestroyed()) { outputWin._managedClose = true; outputWin.destroy(); } outputWin = null; }
+ipcMain.on('output-open', (_e, opts = {}) => {
+  closeOutput();
+  const w = Math.max(320, Math.min(3840, Number(opts.w) || 1280)), h = Math.max(240, Math.min(2160, Number(opts.h) || 720));
+  const bg = /^#[0-9a-f]{6}$/i.test(String(opts.bg)) ? opts.bg : '#00b140';
+  outputWin = new BrowserWindow({ icon: ICON, webPreferences: webPrefs, width: w, height: h, useContentSize: true, title: 'VTOverlay Output', backgroundColor: bg, autoHideMenuBar: true });
+  outputWin.removeMenu();
+  outputWin.loadURL(pageUrl('output.html', { bg }));
+  const me = outputWin;
+  me.on('closed', () => { if (outputWin === me) outputWin = null; try { mainWin?.webContents.send('output-closed'); } catch {} });
+});
+ipcMain.on('output-close', () => closeOutput());
 
 // the browser clipboard API is blocked by our permission rules; use Electron's
 ipcMain.on('copy-text', (_e, text) => clipboard.writeText(String(text ?? '')));
@@ -253,7 +298,8 @@ function displayById(id) {
   return screen.getAllDisplays().find((d) => d.id === id) || screen.getPrimaryDisplay();
 }
 
-ipcMain.handle('start-receiver', (_e, opts) => {
+ipcMain.handle('start-receiver', (_e, opts) => startReceiver(opts));
+function startReceiver(opts) {
   rx.code = opts.code;
   rx.name = opts.name || '';
   rx.mode = MODES.includes(opts.mode) ? opts.mode : 'floating';
@@ -268,15 +314,16 @@ ipcMain.handle('start-receiver', (_e, opts) => {
     globalShortcut.register(HOTKEY, () => doAction(rx.mode === 'floating' ? 'lock-toggle' : 'zone-toggle'));
     if (mainWin) { mainWin._managedClose = true; mainWin.destroy(); mainWin = null; }
   } finally { transitioning--; }
-});
+}
 
 function openOverlay() {
   rx.editingZone = false;
   rx.sharing = false;
-  const qs = new URLSearchParams({ code: rx.code, mode: rx.mode, name: rx.name });
+  if (rx.interact === null) rx.interact = readPrefs().interact !== false;
+  const qs = new URLSearchParams({ code: rx.code, mode: rx.mode, name: rx.name, interact: rx.interact ? '1' : '0' });
   let win;
   if (rx.mode === 'window') {
-    win = newWindow({ width: 520, height: 720, title: `VTOverlay — ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true }, { hideToTray: true });
+    win = newWindow({ width: 520, height: 720, title: `VTOverlay: ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true }, { hideToTray: true });
   } else if (rx.mode === 'screen') {
     const d = displayById(rx.displayId);
     win = newWindow({
@@ -298,7 +345,7 @@ function openOverlay() {
     win.setAlwaysOnTop(true, 'screen-saver');
     win.setVisibleOnAllWorkspaces(true);
   }
-  win.loadURL('app://local/src/overlay.html?' + qs);
+  win.loadURL(pageUrl('overlay.html', Object.fromEntries(qs)));
   win.on('closed', () => { if (overlayWin === win) overlayWin = null; });
 
   if (rx.mode === 'floating') setLocked(false); // start in edit mode so they can place it
@@ -323,10 +370,10 @@ function openPanel() {
   const area = screen.getPrimaryDisplay().workArea;
   panelWin = newWindow({
     width: 380, height: 400, x: area.x + 24, y: area.y + area.height - 424,
-    title: `VTOverlay — ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true,
+    title: `VTOverlay: ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true,
     resizable: false, maximizable: false, fullscreenable: false,
   }, { hideToTray: true });
-  panelWin.loadURL('app://local/src/panel.html');
+  panelWin.loadURL(pageUrl('panel.html'));
   panelWin.webContents.once('did-finish-load', pushState);
   panelWin.on('closed', () => { panelWin = null; });
 }
@@ -341,11 +388,11 @@ function closePanel() {
 function pushState() {
   const state = {
     code: rx.code, mode: rx.mode, displayId: rx.displayId, displays: displayList(),
-    locked: rx.locked, editingZone: rx.editingZone, sharing: rx.sharing, status: rx.status,
+    locked: rx.locked, editingZone: rx.editingZone, sharing: rx.sharing, status: rx.status, interact: rx.interact !== false,
     alwaysOnTop: !!overlayWin && !overlayWin.isDestroyed() && overlayWin.isAlwaysOnTop(),
   };
   if (panelWin && !panelWin.isDestroyed()) panelWin.webContents.send('rx-state', state);
-  if (panelWin && !panelWin.isDestroyed()) panelWin.setTitle(`VTOverlay — ${rx.code}`);
+  if (panelWin && !panelWin.isDestroyed()) panelWin.setTitle(`VTOverlay: ${rx.code}`);
   refreshTray();
 }
 
@@ -361,6 +408,10 @@ async function doAction(action, arg) {
     case 'zone-reset': return overlayWin?.webContents.send('zone-reset');
     case 'share': return setSharing(!!arg);
     case 'on-top': overlayWin?.setAlwaysOnTop(!!arg); return pushState();
+    case 'interact':
+      rx.interact = !!arg; writePrefs({ interact: rx.interact });
+      overlayWin?.webContents.send('interact-changed', rx.interact);
+      return pushState();
     case 'reconnect': return overlayWin?.webContents.send('reconnect');
     case 'disconnect': return disconnectReceiver();
     case 'show': return showReceiverWindow();
@@ -368,7 +419,10 @@ async function doAction(action, arg) {
   }
 }
 ipcMain.on('rx-action', (_e, action, arg) => doAction(action, arg));
-ipcMain.on('rx-status', (_e, state, text) => { rx.status = { state, text }; pushState(); });
+ipcMain.on('rx-status', (_e, state, text) => {
+  if (DEV && text !== rx.status?.text) console.log('viewer status:', text); // shows in the npm run dev terminal
+  rx.status = { state, text }; pushState();
+});
 
 async function switchMode(mode, displayId) {
   if (!MODES.includes(mode)) return;
@@ -485,7 +539,7 @@ function trayMenu() {
     items.push({
       label: 'Full screen on…',
       submenu: displays.map((d, i) => ({
-        type: 'radio', label: `Screen ${i + 1} — ${d.size.width}×${d.size.height}`,
+        type: 'radio', label: `Screen ${i + 1}, ${d.size.width}×${d.size.height}`,
         checked: rx.mode === 'screen' && rx.displayId === d.id, click: () => doAction('display', d.id),
       })),
     });
@@ -507,6 +561,8 @@ function trayMenu() {
   }
   items.push(
     { type: 'separator' },
+    { type: 'checkbox', label: 'Allow interactions (pull hair, headpat, boop)', checked: rx.interact !== false, click: (mi) => doAction('interact', mi.checked) },
+    { type: 'separator' },
     { label: 'Reconnect', click: () => doAction('reconnect') },
     { label: 'Disconnect (back to menu)', click: () => doAction('disconnect') },
     { label: 'Quit VTOverlay', click: () => doAction('quit') },
@@ -517,11 +573,11 @@ function trayMenu() {
 function refreshTray() {
   if (!tray) return;
   tray.setContextMenu(trayMenu());
-  tray.setToolTip(`VTOverlay — ${rx.code}${rx.sharing ? ' — sharing screen' : ''}`);
+  tray.setToolTip(`VTOverlay: ${rx.code}${rx.sharing ? ', sharing screen' : ''}`);
 }
 
 function createTray() {
-  // PNG (Windows can't draw SVG tray icons — that left the old icon invisible)
+  // PNG (Windows can't draw SVG tray icons, that left the old icon invisible)
   let icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   const hi = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray@2x.png'));
   if (!hi.isEmpty()) icon.addRepresentation({ scaleFactor: 2, buffer: hi.toPNG() });
@@ -561,6 +617,12 @@ app.whenReady().then(() => {
     callback(src ? { video: src } : null);
   });
   showLauncher();
+  if (DEV) {
+    const title = `[DEV ${DEV_ROLE}] `;
+    app.on('browser-window-created', (_e, w) => w.on('page-title-updated', (ev, t) => { if (!t.startsWith('[DEV')) { ev.preventDefault(); w.setTitle(title + t); } }));
+    if (DEV_ROLE === 'broadcast' && !RECEIVER_ONLY) setTimeout(() => startSenderPage(), 800);
+    if (DEV_ROLE === 'viewer' && DEV_CODE) setTimeout(() => startReceiver({ code: DEV_CODE, mode: DEV_MODE, name: 'Dev viewer', displayId: screen.getPrimaryDisplay().id }), 4000);
+  }
   // taskbar moved / resized / auto-hide toggled, resolution changed…
   screen.on('display-metrics-changed', () => {
     if (rx.mode === 'screen' && overlayWin && !overlayWin.isDestroyed()) overlayWin.webContents.send('work-area', workAreaOf(rx.displayId));

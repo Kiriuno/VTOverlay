@@ -21,7 +21,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 2. Run `VTOverlay.exe` / `VTOverlay-Viewer.exe`.
 3. Windows SmartScreen may warn the first time because the app isn't code-signed. Click **More info → Run anyway**.
 
-**Updates:** each time you launch the app it checks this repo's latest release. If there's a newer one, the start screen shows *Update available*; click **Update now** and the app downloads it, replaces itself and restarts (**Cancel** stops a download in progress). **Check for updates** is at the bottom of the start screen.
+**Updates:** the start screen checks this repo's latest release every time it opens, including when you come back to it after broadcasting or watching. If there's a newer one, it shows *Update available*: click **Update now** and the app downloads it, replaces itself and restarts (**Cancel** stops a download in progress). A release that comes out while you're broadcasting shows a notice in the sidebar. **Check for updates** is at the bottom of the start screen. If files are still in use, the app restarts on your current version and tells you to try again.
 
 ---
 
@@ -29,7 +29,7 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 
 1. **Start broadcasting** and load your `.vrm` (button or drag & drop). Free models can be made in [VRoid Studio](https://vroid.com/en/studio).
 2. Look at the screen with a relaxed face and press **Calibrate**.
-3. Send your friend the 6-character **room code** (**Copy** button). It stays the same between launches. **Max viewers** optionally limits how many people can watch; anyone extra is told the room is full and gets in as soon as a spot frees up.
+3. Send your friend the 6-character **room code** (**Copy** button; **Hide** masks it on screen, e.g. while streaming, and Copy still works). It stays the same between launches. **Max viewers** optionally limits how many people can watch; anyone extra is told the room is full and gets in as soon as a spot frees up.
 4. Frame the shot in your preview. Viewers see exactly this framing:
    - scroll to zoom
    - middle-drag to move the avatar
@@ -39,17 +39,18 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 | | |
 |---|---|
 | **Pause tracking** | Turns the camera off when you step away. Viewers see your avatar idling (breathing, blinking). Can have a hotkey. |
-| **Movement** | The body follows your head up/down, left/right and forward/back. Each direction has its own sensitivity slider. |
-| **Mouth shapes** | Besides the overall mouth sensitivity, each vowel (A, E, I, O, U) has its own slider, e.g. tone down an over-wide "A" or boost a weak "U". |
-| **Lighting** | Colour, brightness and direction of the main light, plus a fill light (brightness and colour) for the shadows. Viewers see the same lighting. |
+| **Sensitivity** | Mouth, blink, each vowel (A, E, I, O, U), each with a **limit** slider next to it that hard-caps how far that shape can go (e.g. the mouth never opens past 50%), and how much the body follows your head up/down, left/right and forward/back. **Remembered per avatar**: switching models switches their settings (a new model starts from your current ones). Per-expression mouth/blink tuning is part of it too. |
+| **View** | Scroll to zoom, middle-drag to move, right-drag to turn. **Roll** turns the whole picture: sideways, upside down… (buttons, slider, or Shift+right-drag). |
+| **Lighting** | Colour and brightness of the main light, where it comes from (left/right, below/above, **behind/front**), plus a fill light for the shadows. Save your setups as **presets**. Viewers see the same lighting. |
 | **Smoothing** | Less jitter vs. more responsiveness. **Link both eyes** stops accidental winks. |
-| **Expressions** | Every expression your model has gets a button; click to toggle. **Right-click** an expression (or *neutral*) to give it a hotkey (Alt+H, Ctrl+Alt+1, F9…); hotkeys work from any app. There are no default hotkeys, only the ones you set. While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / surprised / angry from your face. |
-| **Props** | Add PNG / JPG / GIF / WebP images (animated ones play). Each prop either stays in the scene or is attached to a body part and moves with it. Drag it in the preview, scroll on it to resize, Shift+scroll to rotate. It can also face the camera, be mirrored, get a hotkey to show/hide it, and more. 🔒 locks a prop so it can't be grabbed by accident; **Lock all** locks every prop. |
+| **Expressions** | Every expression your model has gets a button; click to toggle. **Right-click** an expression (or *neutral*) to give it a hotkey (Alt+H, Ctrl+Alt+1, F9…); hotkeys work from any app. There are no default hotkeys, only the ones you set. While an expression is on, you can tune its **mouth movement** and **blinking**, so a closed-eye smile doesn't blink, for example. **Auto expressions** reads happy / sad / angry / surprised from your face (several cues each, the strongest one shows); **Auto expressions: sensitivity** has a slider and a live meter per emotion so you can tune it to your face. |
+| **Props** | Add PNG / JPG / GIF / WebP images (animated ones play). Each prop stays in the scene or is attached to a body part. Attached ones have a **follow strength** (1 = moves exactly with it, 0.5 = halfway, 0 = stays put) and can stop following its **position** or its **rotation**. Rotate them on all three axes. **Draw** says where it shows: *in front of the avatar*, *behind the avatar*, or *by distance* (its real 3D position, so it can sit e.g. between an arm and the body; only then is there a **Distance** slider). Among props drawn the same way, the one higher in the list is in front: ▲ brings forward, ▼ sends back. Put props in a **group** to show/hide them all with one hotkey. In the preview: drag to move, scroll to resize, Shift+scroll to rotate. 🔒 locks a prop; **Lock all** locks every prop. |
 | **Arms & hands** *(beta)* | Follows your arms and fingers when they're in the camera view. Landmarks are filtered (steady when you hold still, quick when you move), and **Arm & hand smoothing** sets how much. The camera switches to 720p while it's on, because hands need the pixels. |
 | **Out of view** | Step out of frame or turn your head far away, and your avatar keeps its last pose (still blinking) until you're back. If tracking drops while you're in front of the camera, or you pause, it relaxes back to rest as before. |
-| **Pull hair & clothes** | Left-drag hair, a skirt, a ribbon… in your preview and viewers see it swing. **Let viewers grab hair & clothes** (off by default) lets viewers do the same with their mouse, even in full screen; everyone sees every pull. |
+| **Interactions** | Left-drag hair, a skirt, a ribbon… to pull it (you can do this in your preview too). Viewers can also give **headpats**: rubbing the mouse back and forth over the head, quickly enough and for a moment (just passing over it slowly does nothing), squishes it under a patting hand, faster or slower with their rubbing (from half to four times the normal 2.6 pats per second); overshooting the head a little doesn't stop it, and props don't squish. Clicking the nose is a **boop**: a little scrunch and a few tiny stars. Everyone sees all of it. Viewers can pull hair only if you tick **Let viewers grab hair & clothes** (off by default); headpats & boops have their own switch (on by default). The head/nose areas are found automatically; **Adjust headpat & boop areas** fine-tunes them. *The headpat hand:* put the classic headpat gif at `assets/headpat.gif` (it isn't included) and it's used automatically, timed to the pats; otherwise a drawn hand is used. |
+| **Camera output** | **Open camera output** opens a clean window with just your avatar on a green (or blue, magenta…) background, 720p / 1080p / square / vertical. In OBS: *Window Capture* of “VTOverlay Output” → *Filters → Chroma Key* → **Start Virtual Camera**, then pick **OBS Virtual Camera** as your camera in Discord, Zoom, Meet… |
 | **Viewers** | Each viewer shows what they actually see: *Loading your avatar… 42%*, *● Sees you*, or *Avatar hidden* (full screen, you're not tracking). |
-| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. Their taskbar is shown as a strip, and the avatar stays out of it, unless you tick **Can go over the taskbar** (per viewer). That's useful when they watch something full screen and the taskbar is hidden. They can share that screen with you so you see where you're putting it. |
+| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. Their taskbar is shown as a strip; the avatar's feet **snap onto the top of the taskbar**, keep pushing to go over it. **Add image…** (or dropping an image here) puts a picture on their screen: drag it anywhere, scroll to resize; it always faces them and can be in front of or behind the avatar. They can share that screen with you so you see where you're putting things. |
 
 ## Watching (your friend)
 
@@ -57,13 +58,15 @@ Type the code, choose how to show the avatar, then **Join**:
 
 - **Floating**: a small see-through widget. Drag it, scroll to resize, **Ctrl+Alt+V** to lock it (click-through).
 - **Window**: a normal window.
-- **Full screen**: a click-through layer over a monitor. The broadcaster places the avatar. **Ctrl+Alt+V** opens the zone editor, which limits the avatar to part of the screen. If the broadcaster stops tracking for 30 seconds (paused, away from the camera, or disconnected), the avatar fades out, and it comes back as soon as tracking resumes.
+- **Full screen**: a click-through layer over a monitor. The broadcaster places the avatar. **Ctrl+Alt+V** opens the zone editor, which limits the avatar to part of the screen. If the broadcaster stops tracking for 30 seconds (paused, away from the camera, camera covered or turned off so the image is black, or disconnected), the avatar fades out, and it comes back as soon as tracking resumes. Images placed on the screen stay.
 
 The **control window** (floating and full screen modes) has every action:
 - switch mode or monitor
 - edit the zone
 - share the screen with the broadcaster (off by default)
 - reconnect, disconnect, quit
+
+**Allow interactions** (control window or tray menu) switches pulling, headpats and boops off on your side, so clicks always reach whatever is behind the avatar.
 
 Its ✕ hides it to the tray (the ^ next to the clock). Click the tray icon to bring it back. **Quit** closes the app.
 
@@ -80,7 +83,7 @@ Its ✕ hides it to the tray (the ^ next to the clock). Click the tray icon to b
 - **Can't connect at all:** some networks block direct connections (phone hotspots, campus or work Wi-Fi, CGNAT). Those need a TURN relay; see *Advanced* below.
 - **Wrong eye winks:** toggle **Swap left/right eyes & mouth**.
 - **Hotkey shows red:** another app already uses that combination; pick another.
-- **An update failed:** the details are in `%TEMP%\vtoverlay-update.log`. The usual cause is the app folder being in a protected place like `Program Files`.
+- **An update failed:** the details are in `%TEMP%\vtoverlay-update.log`. If it says files were in use, just click **Update now** again. Otherwise the usual cause is the app folder being in a protected place like `Program Files`.
 
 ---
 
@@ -90,21 +93,28 @@ Requires [Node.js](https://nodejs.org) 20+.
 
 ```bash
 npm install
+npm run dev              # a broadcaster + a viewer, already linked (dev rooms only, see below)
 npm start                # run from source (broadcast + view)
 npm run start-viewer     # run as the viewer-only app
 npm run package-all      # build dist/VTOverlay-win32-x64 and dist/VTOverlay-Viewer-win32-x64
 npm run release-zips     # same, plus the two zips a GitHub release needs
 ```
 
+`npm run dev` starts both apps from your source folder with a fresh room code and joins the viewer to it. Dev apps use their own rooms (a different room-name prefix), so a dev broadcaster and a released viewer can never see each other, and the other way round. They also keep their own settings. Options: `npm run dev -- --mode=floating` (or `screen`), `--code=ABC123`, `--only=viewer`. The viewer's connection status is printed in the terminal.
+
 ## Publishing a release (maintainer)
 
 Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a version tag is pushed:
 
 ```bash
-# 1. bump "version" in package.json, e.g. 0.6.1, then:
-git commit -am "v0.6.1"
-git tag v0.6.1
-git push && git push --tags
+# 1. set the version (three numbers) in package.json + package-lock.json:
+npm version 0.8.1 --no-git-tag-version
+# 2. commit EVERYTHING (git add -A also picks up new files; commit -am does not):
+git add -A
+git commit -m "v0.8.1"
+git tag v0.8.1
+git push
+git push origin v0.8.1
 ```
 
 About 5 minutes later the release appears with both zips attached, and every installed copy offers the update. The workflow refuses to publish if the tag and `package.json` disagree. The repo must be **public**, because the apps read the latest release without logging in.
@@ -137,7 +147,11 @@ About 5 minutes later the release appears with both zips attached, and every ins
 - `src/shared/`:
   - `avatar.js`: VRM animation
   - `props.js`
-  - `arms.js`
+  - `arms.js`: arm / hand tracking and its filtering
+  - `grab.js`: pulling hair & clothes
+  - `fx.js`: headpats & boops
+- `src/output.*`: camera output window (OBS)
+- `scripts/dev.js`: `npm run dev`
   - `filters.js`
   - `protocol.js`: the message format, documented
 

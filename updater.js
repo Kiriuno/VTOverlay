@@ -37,7 +37,8 @@ async function check({ receiverOnly, version }) {
   if (!app.isPackaged && !process.env.VT_UPDATE_API) return { state: 'dev', current };
   let res;
   try {
-    res = await net.fetch(API, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'VTOverlay-updater' } });
+    // never answer from the HTTP cache: a release published while the app was open must show up
+    res = await net.fetch(API, { cache: 'no-store', headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'VTOverlay-updater', 'Cache-Control': 'no-cache' } });
   } catch (err) { return { state: 'error', current, error: 'Could not reach GitHub (' + err.message + ')' }; }
   if (res.status === 404) return { state: 'none', current }; // no release published yet
   if (!res.ok) return { state: 'error', current, error: `GitHub answered ${res.status}` };
@@ -70,8 +71,43 @@ async function download(url, file, onProgress, signal) {
   await new Promise((r, j) => out.end((e) => (e ? j(e) : r())));
 }
 
+/**
+ * Extract a zip into dir, refusing anything that could write outside it: absolute paths or ".."
+ * (yauzl rejects those itself) and symbolic links (which could point anywhere). Release zips only
+ * hold plain files and folders, so anything else means the download isn't what we expect.
+ */
+function unzip(zipPath, dir) {
+  const yauzl = require('yauzl');
+  const root = path.resolve(dir);
+  fs.mkdirSync(root, { recursive: true });
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
+      if (err) return reject(err);
+      const fail = (e) => { try { zip.close(); } catch {} reject(e); };
+      zip.on('error', fail);
+      zip.on('end', resolve);
+      zip.on('entry', (entry) => {
+        const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
+        const dest = path.resolve(root, entry.fileName);
+        if ((mode & 0o170000) === 0o120000) return fail(new Error('update archive contains a link: ' + entry.fileName));
+        if (dest !== root && !dest.startsWith(root + path.sep)) return fail(new Error('update archive entry outside its folder: ' + entry.fileName));
+        if (/\/$/.test(entry.fileName)) { fs.mkdirSync(dest, { recursive: true }); return zip.readEntry(); }
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        zip.openReadStream(entry, (e, rs) => {
+          if (e) return fail(e);
+          const ws = fs.createWriteStream(dest, { mode: (mode & 0o777) || 0o644 });
+          rs.on('error', fail); ws.on('error', fail);
+          ws.on('finish', () => zip.readEntry());
+          rs.pipe(ws);
+        });
+      });
+      zip.readEntry();
+    });
+  });
+}
+
 async function install(info, { onProgress, quit, signal }) {
-  if (!app.isPackaged && !process.env.VT_UPDATE_API) throw new Error('Running from source — use git pull instead.');
+  if (!app.isPackaged && !process.env.VT_UPDATE_API) throw new Error('Running from source, use git pull instead.');
   const work = fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX));
   const zip = path.join(work, 'update.zip');
   try {
@@ -82,10 +118,9 @@ async function install(info, { onProgress, quit, signal }) {
   }
   if (signal?.aborted) { fs.rmSync(work, { recursive: true, force: true }); throw new Error('cancelled'); }
   onProgress?.({ phase: 'extract', fraction: 1 });
-  const extract = require('extract-zip');
   const dir = path.join(work, 'files');
   process.noAsar = true; // treat app.asar as a plain file while extracting
-  try { await extract(zip, { dir }); } finally { process.noAsar = false; }
+  try { await unzip(zip, dir); } finally { process.noAsar = false; }
   fs.rmSync(zip, { force: true });
   // the zip holds one top-level folder (e.g. VTOverlay-win32-x64/)
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -110,27 +145,51 @@ function applyIfRequested() {
   process.on('uncaughtException', (e) => log('uncaught: ' + (e.stack || e.message)));
   process.on('unhandledRejection', (e) => log('unhandled: ' + (e?.stack || e)));
   const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const installedExe = path.join(target, path.basename(process.execPath));
   (async () => {
     try {
       log(`apply: ${src} -> ${target} (waiting for ${pid})`);
-      for (let i = 0; i < 300 && pid && alive(pid); i++) await new Promise((r) => setTimeout(r, 100));
+      for (let i = 0; i < 300 && pid && alive(pid); i++) await sleep(100);
       if (!target || !fs.existsSync(target)) throw new Error('install folder not found: ' + target);
+      // Windows: the old app can leave helper processes behind for a while (crash reporter, GPU /
+      // camera utility processes, all VTOverlay.exe), and they keep the files locked. Stop anything
+      // still running from the install folder (never this helper, which runs from the temp folder).
+      stopLeftovers(target, log);
       // Only now (main.js has finished loading from app.asar) switch asar handling off,
       // so app.asar gets copied as a file instead of being read as a folder.
       process.noAsar = true;
       let lastErr;
-      for (let attempt = 0; attempt < 20; attempt++) { // files can stay locked for a moment (antivirus, Explorer)
-        try { fs.cpSync(src, target, { recursive: true, force: true }); lastErr = null; break; } catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 500)); }
+      const t0 = Date.now();
+      for (let attempt = 0; Date.now() - t0 < 60000; attempt++) { // antivirus / Explorer can hold files for a moment
+        try { fs.cpSync(src, target, { recursive: true, force: true }); lastErr = null; break; } catch (e) {
+          lastErr = e;
+          if (attempt % 5 === 4) { log(`apply: still locked (${e.code || e.message}), retrying…`); stopLeftovers(target, log); }
+          await sleep(1000);
+        }
       }
       if (lastErr) throw lastErr;
       log('apply: copied, restarting');
-      spawn(path.join(target, path.basename(process.execPath)), ['--vt-updated'], { detached: true, stdio: 'ignore', cwd: target }).unref();
+      spawn(installedExe, ['--vt-updated'], { detached: true, stdio: 'ignore', cwd: target }).unref();
     } catch (e) {
       log('apply failed: ' + (e.stack || e.message));
+      // never leave you with nothing: start the version you had, and say what happened
+      try { if (fs.existsSync(installedExe)) spawn(installedExe, ['--vt-update-failed'], { detached: true, stdio: 'ignore', cwd: target }).unref(); } catch {}
     }
     app.exit(0);
   })();
   return true;
+}
+
+// Windows only: end processes whose executable lives in the install folder (except ourselves).
+function stopLeftovers(target, log) {
+  if (process.platform !== 'win32') return;
+  try {
+    const dir = path.resolve(target).replace(/'/g, "''") + '\\*';
+    const ps = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '${dir}' -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }`;
+    const out = require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    if (out.trim()) log('apply: stopped leftover processes ' + out.trim().split(/\s+/).join(', '));
+  } catch (e) { log('apply: could not list leftover processes: ' + e.message); }
 }
 
 // Remove leftovers of earlier updates (not the one we might be running from).

@@ -50,6 +50,9 @@
     </div>
   </div>
 
+  <h3>Interacting with the avatar</h3>
+  <label class="toggle" title="Pull hair & clothes, headpat and boop (when the broadcaster allows it). Off: clicks always go through to what's behind the avatar."><input type="checkbox" id="interact"> Allow interactions (pull hair, headpat, boop)</label>
+
   <h3>Connection</h3>
   <div class="row">
     <button id="reconnect">Reconnect</button>
@@ -68,6 +71,7 @@
   $('zone').onclick = () => act('zone-toggle');
   $('zoneReset').onclick = () => act('zone-reset');
   $('share').onchange = () => act('share', $('share').checked);
+  $('interact').onchange = () => act('interact', $('interact').checked);
   $('lock').onclick = () => act('lock-toggle');
   $('resetPos').onclick = () => act('reset-pos');
   $('reconnect').onclick = () => act('reconnect');
@@ -85,6 +89,7 @@
     $('display').innerHTML = st.displays.map((d) => `<option value="${d.id}">${d.label}</option>`).join('');
     $('display').value = String(st.displayId);
     $('share').checked = st.sharing;
+    $('interact').checked = st.interact;
     $('zone').firstChild.textContent = st.editingZone ? 'Finish zone' : 'Select zone';
     $('lock').firstChild.textContent = st.locked ? 'Move / resize' : 'Lock in place';
   });

@@ -1,11 +1,12 @@
 {
   "name": "vtoverlay",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Stream your VTuber avatar onto a friend's desktop",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "start-viewer": "electron . --viewer",
+    "dev": "node scripts/dev.js",
     "package-win": "node scripts/package.js full",
     "package-viewer": "node scripts/package.js viewer",
     "package-all": "node scripts/package.js full viewer",
@@ -16,9 +17,9 @@
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.0",
     "@pixiv/three-vrm": "^3.5.5",
-    "extract-zip": "^2.0.1",
     "peerjs": "^1.5.5",
-    "three": "^0.186.1"
+    "three": "^0.186.1",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",

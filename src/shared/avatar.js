@@ -6,6 +6,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { ARKIT, ARKIT_INDEX, DEFAULT_VIEW, DEFAULT_STYLE, normalizeStyle } from './protocol.js';
 import { FINGER_SEGMENTS } from './arms.js';
 import { PropLayer } from './props.js';
+import { AvatarFx } from './fx.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const SIDES = { l: 'left', r: 'right' };
@@ -27,7 +28,9 @@ export class AvatarStage {
     this.canvas = canvas;
     this.viewport = null; // optional "virtual box" (see setViewport)
     this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, premultipliedAlpha: false });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
+    this.maxPixelRatio = Math.min(window.devicePixelRatio, maxPixelRatio);
+    this.pixelBudget = 0; // >0: lower the resolution of big canvases so they never cost more than this many pixels
+    this.renderer.setPixelRatio(this.maxPixelRatio);
     this.expressions = [];
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -42,6 +45,7 @@ export class AvatarStage {
     this.keyLight.target.position.set(0, 1, 0);
     this.ambLight = new THREE.AmbientLight(0xffffff, Math.PI * 0.45);
     this.scene.add(this.keyLight, this.keyLight.target, this.ambLight);
+    this.keyLight.layers.enableAll(); this.ambLight.layers.enableAll(); // lights count in every render pass
     this.setStyle(DEFAULT_STYLE);
     this.suspended = false; // true = don't render at all (hidden viewer)
 
@@ -61,6 +65,7 @@ export class AvatarStage {
     this.springJoints = []; this.jointByBone = new Map();
     this.grabs = new Map(); // key → { j, p (avatar-local target), at, remote }
     this.props = new PropLayer(this);
+    this.fx = new AvatarFx(this); // headpats & boops
     this._resize();
     new ResizeObserver(() => this._resize()).observe(canvas);
     this.renderer.setAnimationLoop(() => this._tick());
@@ -68,14 +73,42 @@ export class AvatarStage {
 
   _resize() {
     const w = this.canvas.clientWidth || 1, h = this.canvas.clientHeight || 1;
+    // Setting a canvas's size wipes it, even to the same size, and the ResizeObserver runs right
+    // before the screen is painted, so an unneeded resize flashes a blank frame. Only resize when the
+    // size really changed, and then draw straight away.
+    if (w === this._w && h === this._h) { this._applyProjection(); return; }
+    this._w = w; this._h = h;
+    if (this.pixelBudget) this.renderer.setPixelRatio(Math.min(this.maxPixelRatio, Math.sqrt(this.pixelBudget / (w * h))));
     this.renderer.setSize(w, h, false);
     this._applyProjection();
     this._frameCamera();
+    this.renderNow();
   }
+
+  /** Draw a frame right now (e.g. after the canvas was resized), outside the normal frame loop. */
+  renderNow() {
+    if (this.suspended) return;
+    this.props.update(this.camera);
+    this._render();
+  }
+
+  // Drawn in passes (three.js layers): 1 = props set to "behind the avatar", 0 = the avatar and props
+  // placed "by distance", 2 = props "in front of the avatar", 3 = headpat / boop effects. So "behind" and
+  // "in front" hold whatever the props' 3D positions are.
+  _render() {
+    const r = this.renderer, cam = this.camera;
+    r.autoClear = false;
+    r.clear();
+    for (const layer of [1, 0, 2, 3]) { cam.layers.set(layer); r.render(this.scene, cam); }
+    cam.layers.set(0);
+  }
+
+  /** Call after changing the canvas's CSS size: resizes the drawing buffer and redraws in the same frame. */
+  syncSize() { this._resize(); }
 
   /**
    * Frame the avatar as if the canvas were only the box {x, y, w, h} (CSS px, relative to the canvas),
-   * but keep drawing outside it — so arms, hair or a zoomed-in shot are never cut at the box edge.
+   * but keep drawing outside it, so arms, hair or a zoomed-in shot are never cut at the box edge.
    * Pass null to use the whole canvas as the frame again.
    */
   setViewport(vp) {
@@ -98,13 +131,14 @@ export class AvatarStage {
   /** Update the camera/model view. Any subset of {fr, zoom, px, py, yaw, el}. */
   setView(v) {
     const src = { ...this.view, ...v };
-    const n = { fr: src.fr, zoom: src.zoom, px: src.px, py: src.py, yaw: src.yaw, el: src.el };
+    const n = { fr: src.fr, zoom: src.zoom, px: src.px, py: src.py, yaw: src.yaw, el: src.el, roll: src.roll };
     n.fr = n.fr === 'full' ? 'full' : 'bust';
     n.zoom = Math.max(0.3, Math.min(5, +n.zoom || 1));
     n.px = Math.max(-2, Math.min(2, +n.px || 0));
     n.py = Math.max(-2, Math.min(2, +n.py || 0));
     n.yaw = Math.max(-Math.PI, Math.min(Math.PI, +n.yaw || 0));
     n.el = Math.max(-0.6, Math.min(0.6, +n.el || 0));
+    n.roll = Math.max(-180, Math.min(180, +n.roll || 0)); // degrees, + = counter-clockwise on screen
     this.view = n;
     this._frameCamera();
     return n;
@@ -114,18 +148,20 @@ export class AvatarStage {
   setStyle(st) {
     const n = normalizeStyle(st);
     this.style = n;
-    const L = n.light, rad = THREE.MathUtils.degToRad;
+    const L = n.light;
     this.keyLight.color.set(L.color);
     this.keyLight.intensity = Math.PI * L.i;
-    // direction: az 0 = from the camera, + = from the right of the screen; el + = from above
-    const az = rad(L.az), el = rad(L.el);
-    this.keyLight.position.set(Math.sin(az) * Math.cos(el) * 3, 1 + Math.sin(el) * 3, Math.cos(az) * Math.cos(el) * 3);
+    // the direction the light comes from (x right, y up, z toward the camera); all zero → straight ahead
+    const dir = new THREE.Vector3(L.x, L.y, L.z);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, 1);
+    dir.normalize();
+    this.keyLight.position.set(dir.x * 3, 1 + dir.y * 3, dir.z * 3);
     this.ambLight.color.set(L.ambColor);
     this.ambLight.intensity = Math.PI * L.amb;
     return n;
   }
 
-  /** Height of the visible area in world units — used to convert mouse drags to pans. */
+  /** Height of the visible area in world units, used to convert mouse drags to pans. */
   visibleHeight() { return this._span / this.view.zoom; }
 
   _frameCamera() {
@@ -144,6 +180,8 @@ export class AvatarStage {
     const dist = (span / 2) / Math.tan(fov / 2) / zoom;
     this.camera.position.set(target.x, target.y + Math.sin(el) * dist, Math.cos(el) * dist);
     this.camera.lookAt(target);
+    // roll: turning the camera clockwise turns the picture (the avatar) counter-clockwise
+    if (this.view.roll) this.camera.rotateZ(-this.view.roll * Math.PI / 180);
   }
 
   async loadVRM(arrayBuffer, modelId = null) {
@@ -192,13 +230,15 @@ export class AvatarStage {
 
     vrm.update(0);
     this.props.captureRest(vrm);
+    this.fx.captureRest(vrm);
     this._frameCamera();
     return { perfectSync: this.perfectSync, expressions: this.expressions, name: vrm.meta?.name ?? vrm.meta?.title ?? 'Avatar' };
   }
 
   clearVRM() {
     if (!this.vrm) return;
-    this.props.detachFromModel(); // props live on bones; keep them out of the dispose
+    this.props.detachFromModel();
+    this.fx.captureRest(null);
     this.scene.remove(this.vrm.scene);
     VRMUtils.deepDispose(this.vrm.scene);
     this.vrm = null;
@@ -230,7 +270,8 @@ export class AvatarStage {
     const t = this.timer.getElapsed();
     if (this.vrm) this._animate(dt, t);
     this.props.update(this.camera);
-    this.renderer.render(this.scene, this.camera);
+    if (this.vrm) this.fx.update(dt, this.camera);
+    this._render();
   }
 
   _animate(dt, t) {
@@ -254,7 +295,7 @@ export class AvatarStage {
     const neck = hb('neck'), head = hb('head'), spine = hb('spine'), chest = hb('chest') || hb('upperChest');
     if (neck) neck.quaternion.copy(ident).slerp(headQ, 0.35);
     if (head) head.quaternion.copy(ident).slerp(headQ, neck ? 0.55 : 0.9);
-    // the whole body follows the head (up/down, left/right, toward/away — scaled by the broadcaster's
+    // the whole body follows the head (up/down, left/right, toward/away, scaled by the broadcaster's
     // sensitivity sliders), with a slight lean so it doesn't look like a sliding cut-out; plus breathing
     const hips = hb('hips');
     if (hips && this.hipsRest) hips.position.set(this.hipsRest.x + s * cur.p.x, this.hipsRest.y + cur.p.y, this.hipsRest.z + s * cur.p.z);
@@ -284,34 +325,46 @@ export class AvatarStage {
     if (em) {
       const idleBlink = live && !tgt.hold ? 0 : this._idleBlink(t);
       const smile = (B('mouthSmileLeft') + B('mouthSmileRight')) / 2;
-      const vg = this.style.vg;
+      const vg = this.style.vg, vm = this.style.vm;
       if (this.perfectSync) {
         // per-vowel sensitivity, mapped onto the ARKit shapes that mostly form each vowel
-        for (let i = 0; i < ARKIT.length; i++) if (this.syncMap[i]) em.setValue(this.syncMap[i], clamp01(cur.b[i] * (SYNC_VOWEL[i] ? vg[SYNC_VOWEL[i]] : 1)));
+        for (let i = 0; i < ARKIT.length; i++) if (this.syncMap[i]) em.setValue(this.syncMap[i], SYNC_VOWEL[i] ? Math.min(vm[SYNC_VOWEL[i]], clamp01(cur.b[i] * vg[SYNC_VOWEL[i]])) : cur.b[i]);
         if (!live || tgt.hold) { em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkLeft] ?? 'blinkLeft', idleBlink); em.setValue(this.syncMap[ARKIT_INDEX.eyeBlinkRight] ?? 'blinkRight', idleBlink); }
       } else {
         const jaw = B('jawOpen'), pucker = B('mouthPucker'), funnel = B('mouthFunnel');
         const stretch = (B('mouthStretchLeft') + B('mouthStretchRight')) / 2;
         em.setValue('blinkLeft', Math.max(B('eyeBlinkLeft'), idleBlink));
         em.setValue('blinkRight', Math.max(B('eyeBlinkRight'), idleBlink));
-        em.setValue('aa', clamp01(jaw * (1 - pucker * 0.8) * (1 - funnel * 0.6) * vg.aa));
-        em.setValue('oh', clamp01(funnel * 1.2 * Math.min(1, jaw * 3) * vg.oh));
-        em.setValue('ou', clamp01(pucker * 1.1 * vg.ou));
-        em.setValue('ee', clamp01((stretch * 1.5 + smile * jaw * 1.2) * vg.ee));
-        em.setValue('ih', clamp01(jaw * 0.6 * smile * vg.ih));
+        const set = (k, v) => em.setValue(k, Math.min(vm[k], clamp01(v * vg[k]))); // sensitivity, then hard limit
+        set('aa', jaw * (1 - pucker * 0.8) * (1 - funnel * 0.6));
+        set('oh', funnel * 1.2 * Math.min(1, jaw * 3));
+        set('ou', pucker * 1.1);
+        set('ee', stretch * 1.5 + smile * jaw * 1.2);
+        set('ih', jaw * 0.6 * smile);
       }
-      // Auto expressions: read the emotion off the face-shape weights (no extra model needed)
-      const browUp = B('browInnerUp');
-      const browDown = (B('browDownLeft') + B('browDownRight')) / 2;
-      const frown = (B('mouthFrownLeft') + B('mouthFrownRight')) / 2;
-      const wide = (B('eyeWideLeft') + B('eyeWideRight')) / 2;
-      const auto = live && tgt.ae ? {
-        happy: clamp01((smile - 0.3) * 1.6),
-        angry: clamp01((browDown - 0.35) * 1.8) * (1 - clamp01(smile * 2)),
-        sad: clamp01((frown - 0.2) * 1.5 + (browUp - 0.5) * 0.5) * (1 - clamp01(smile * 2)),
-        surprised: clamp01((browUp - 0.45) * 1.3 + (wide - 0.3) + (B('jawOpen') - 0.4) * 0.5),
-        relaxed: 0,
-      } : {};
+      // Auto expressions: read the emotion off the face-shape weights (no extra model needed). Each one
+      // combines several cues (one cue alone, like raised brows, is too common in normal talking), scaled by
+      // the broadcaster's sensitivity (style.ag); only the strongest shows, so they don't blur together.
+      const avg = (a, b) => (B(a) + B(b)) / 2, pos = (v) => Math.max(0, v);
+      const browInner = B('browInnerUp'), browOuter = avg('browOuterUpLeft', 'browOuterUpRight');
+      const browDown = avg('browDownLeft', 'browDownRight'), frown = avg('mouthFrownLeft', 'mouthFrownRight');
+      const wide = avg('eyeWideLeft', 'eyeWideRight'), squint = avg('eyeSquintLeft', 'eyeSquintRight');
+      const sneer = avg('noseSneerLeft', 'noseSneerRight'), press = avg('mouthPressLeft', 'mouthPressRight');
+      const cheek = avg('cheekSquintLeft', 'cheekSquintRight');
+      const notSmiling = 1 - clamp01(smile * 1.5);
+      const ag = this.style.ag;
+      const raw = {
+        happy: pos(smile - 0.22) * 1.8 + cheek * 0.3,
+        sad: (pos(frown - 0.03) * 3 + pos(browInner - browOuter - 0.05) * 1.8 + pos(B('mouthShrugLower') - 0.15) * 0.6) * notSmiling,
+        angry: (pos(browDown - 0.1) * 2.2 + sneer * 1.4 + pos(squint - 0.25) * 0.6 + press * 0.5) * notSmiling,
+        surprised: pos((browInner + browOuter) / 2 - 0.18) * 1.4 + pos(wide - 0.08) * 1.6 + pos(B('jawOpen') - 0.25) * 0.6,
+      };
+      const scores = {};
+      for (const k in raw) scores[k] = clamp01(raw[k] * (ag[k] ?? 1));
+      this.autoScores = scores; // for the broadcaster's meters
+      let top = null;
+      for (const k in scores) if (!top || scores[k] > scores[top]) top = k;
+      const auto = live && tgt.ae && top && scores[top] > 0.12 ? { [top]: scores[top], relaxed: 0 } : {};
       // perfect-sync models already show smiles etc. through their blendshapes, so keep auto subtle there
       const autoGain = this.perfectSync ? 0.35 : 0.75;
       // hotkey expressions fade in/out and override the auto ones
@@ -323,6 +376,7 @@ export class AvatarStage {
     }
 
     const restore = this._applyGrabs();
+    this.fx.applyBones(dt);
     vrm.update(dt);
     if (restore) for (const [jt, st] of restore) Object.assign(jt.settings, st);
   }
@@ -338,6 +392,7 @@ export class AvatarStage {
   /** Spring joint whose tail is nearest the canvas point (CSS px), within maxPx; -1 if none. */
   pickJoint(x, y, maxPx = 26) {
     if (!this.vrm || !this.springJoints.length) return -1;
+    this.camera.updateMatrixWorld(); // the view may have changed since the last frame was drawn
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight, v = new THREE.Vector3();
     // Hair behind the head projects onto the face too: prefer joints in front of the head's centre
     // (as seen from the camera); ones behind only win when nothing in front is near the cursor.

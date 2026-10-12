@@ -2,6 +2,8 @@
 // How the avatar is framed (bust/full, zoom, position, rotation) is controlled by the broadcaster.
 import { AvatarStage } from './shared/avatar.js';
 import { SpringGrabber } from './shared/grab.js';
+import { FxInput } from './shared/fx.js';
+import { normalizeProp } from './shared/props.js';
 import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, IDLE_HIDE_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
@@ -37,6 +39,40 @@ function status(state, text, { autoHide = false, retry = false } = {}) {
 }
 $('retryBtn').onclick = () => reconnectNow();
 
+// ---------------- props placed on the viewer's screen (full screen mode only) ----------------
+// (they stay visible when the avatar is hidden for being away)
+// Plain images over the whole monitor (not part of the 3D picture, so they can be anywhere and cost
+// nothing to draw). Draw 'back' = behind the avatar.
+const screenPropEls = new Map(); // id → <img>
+const propUrls = new Map(); // image hash → object URL
+function renderScreenProps(list) {
+  const want = MODE === 'screen' ? list.map(normalizeProp).filter((d) => d.attach === 'screen') : [];
+  for (const [id, el] of screenPropEls) if (!want.some((d) => d.id === id)) { el.remove(); screenPropEls.delete(id); }
+  for (const d of want) {
+    let el = screenPropEls.get(d.id);
+    if (!el || el.dataset.img !== d.img) {
+      el?.remove();
+      el = document.createElement('img');
+      el.className = 'sprop'; el.dataset.img = d.img; el.alt = '';
+      const url = propUrls.get(d.img);
+      if (url) el.src = url;
+      else stage.props.loader?.(d.img).then((b) => { if (!b) return; if (!propUrls.has(d.img)) propUrls.set(d.img, URL.createObjectURL(b)); el.src = propUrls.get(d.img); });
+      screenPropEls.set(d.id, el);
+    }
+    const layerEl = $(d.draw === 'back' ? 'spBack' : 'spFront');
+    if (el.parentNode !== layerEl) layerEl.appendChild(el);
+    const h = d.size * innerHeight;
+    Object.assign(el.style, {
+      left: d.pos[0] * innerWidth + 'px', top: d.pos[1] * innerHeight + 'px', height: h + 'px',
+      transform: `translate(-50%, -50%) scaleX(${d.flip ? -1 : 1})`, // always facing you
+      zIndex: want.length - want.indexOf(d), // higher in the broadcaster's list = in front
+    });
+    el.hidden = !d.visible;
+  }
+}
+let lastPropList = [];
+addEventListener('resize', () => renderScreenProps(lastPropList));
+
 // ---------------- tell the broadcaster what we see ----------------
 let rxState = { s: 'waiting', p: 0 }, rxSentAt = 0;
 function reportRx(s, p = 0) {
@@ -59,7 +95,7 @@ function setIdleHidden(on) {
   if (hasModel) reportRx(on ? 'hidden' : 'ready');
   if (on) setTimeout(() => { if (idleHidden) stage.suspended = true; }, 900); // after the fade
   else stage.suspended = false;
-  if (on) window.vt.reportStatus('warn', 'Avatar hidden — the broadcaster isn\'t tracking');
+  if (on) window.vt.reportStatus('warn', 'Avatar hidden, the broadcaster isn\'t tracking');
   else window.vt.reportStatus($('dot').className.replace('dot', '').trim() || 'ok', $('statusText').textContent || 'Connected');
 }
 if (MODE === 'screen') {
@@ -102,7 +138,7 @@ if (MODE === 'floating') {
   let drag = null;
   window.addEventListener('mousedown', (e) => {
     if (locked || e.button !== 0 || e.target.closest('button')) return;
-    if (grabber.grabbing || grabber.over(e) >= 0) return; // pulling hair, not moving the widget
+    if (grabber.grabbing || grabber.over(e) >= 0 || fxIn.over(e) === 'nose') return; // pulling hair / booping, not moving the widget
     drag = { x: e.screenX, y: e.screenY };
     document.body.classList.add('dragging');
   });
@@ -119,12 +155,24 @@ if (MODE === 'floating') {
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !locked) window.vt.setLocked(true); });
 }
 
-// ---------------- pulling hair / clothes (only if the broadcaster allows it) ----------------
-let grabAllowed = false;
+// ---------------- interacting: pull hair / clothes, headpat, boop ----------------
+// Each needs the broadcaster's permission; the viewer can also switch all of it off on their side
+// (tray / control window), so clicks always go through to what's behind the avatar.
+let grabAllowed = false, patAllowed = false;
+let localInteract = params.get('interact') !== '0';
+const canInteract = () => localInteract && hasModel && !idleHidden && !document.body.classList.contains('zoning');
 const grabber = new SpringGrabber(stage, $('stage'), {
   send: (j, p) => { try { if (model?.open) model.send({ t: 'grab', j, p }); } catch {} },
-  canGrab: () => grabAllowed && hasModel && !idleHidden && !document.body.classList.contains('zoning'),
+  canGrab: () => grabAllowed && canInteract(),
 });
+const sendFx = (k, r) => { try { if (model?.open) model.send({ t: 'fx', k, r }); } catch {} };
+let lastBoop = 0;
+const fxIn = new FxInput(stage.fx, $('stage'), {
+  onPat: (r) => sendFx('pat', r),
+  onBoop: () => { lastBoop = performance.now(); sendFx('boop'); },
+  enabled: () => patAllowed && canInteract() && performance.now() - lastBoop > 250,
+});
+window.vt.onInteract((on) => { localInteract = on; if (!on) setGrabAllowed(grabAllowed); });
 // Full screen and a locked widget are click-through: they only take the mouse while it's over
 // something grabbable (and while a pull is going on), then hand it straight back to the desktop.
 let capturing = false;
@@ -135,16 +183,19 @@ function setCapture(on) {
   window.vt.captureMouse(on);
 }
 function updateHover(e) {
-  const over = grabber.grabbing || grabber.over(e) >= 0;
-  document.body.style.cursor = grabber.grabbing ? 'grabbing' : over ? 'grab' : '';
+  const nose = !grabber.grabbing && fxIn.over(e) === 'nose';
+  const over = grabber.grabbing || nose || grabber.over(e) >= 0;
+  document.body.style.cursor = grabber.grabbing ? 'grabbing' : nose ? 'pointer' : over ? 'grab' : '';
   if (clickThrough()) setCapture(over);
 }
-addEventListener('mousemove', (e) => {
+addEventListener('pointermove', (e) => {
   if (grabber.grabbing) grabber.move(e);
+  else if (!e.buttons) fxIn.move(e); // rubbing over the head = headpat (works even while click-through)
   updateHover(e);
 });
 addEventListener('mousedown', (e) => {
   if (e.button !== 0 || e.target.closest('button, #zoneEditor')) return;
+  if (fxIn.down(e)) { e.preventDefault(); return; } // boop!
   if (grabber.begin(e)) { e.preventDefault(); updateHover(e); }
 });
 addEventListener('mouseup', (e) => { if (grabber.grabbing) { grabber.end(); updateHover(e); } });
@@ -152,7 +203,8 @@ addEventListener('blur', () => { if (grabber.grabbing) grabber.end(); });
 document.addEventListener('mouseleave', () => { if (!grabber.grabbing) { document.body.style.cursor = ''; if (clickThrough()) setCapture(false); } });
 function setGrabAllowed(on) {
   grabAllowed = on;
-  if (!on) { grabber.end(); stage.clearGrabs(); document.body.style.cursor = ''; if (clickThrough()) setCapture(false); }
+  if (!on || !localInteract) { grabber.end(); document.body.style.cursor = ''; if (clickThrough()) setCapture(false); }
+  if (!on) stage.clearGrabs(); // nobody may pull anymore: drop everyone's pulls
 }
 
 // ---------------- screen: zone + remote placement ----------------
@@ -162,7 +214,7 @@ let pos = { ...DEFAULT_POS, ...store.get('vt-pos', {}) };
 const shown = { ...pos }; // smoothed
 
 let work = { x: 0, y: 0, w: 1, h: 1 }; // monitor minus the taskbar (filled in below)
-// the area the avatar may use: the zone minus the taskbar — or the whole zone when the broadcaster
+// the area the avatar may use: the zone minus the taskbar, or the whole zone when the broadcaster
 // lets it go over the taskbar (pos.tb; handy when we're watching something full screen)
 const usableZone = (p = pos) => effectiveZone(zone, p.tb ? FULL_ZONE : work);
 function zonePx(z = usableZone()) {
@@ -178,19 +230,30 @@ function clampPos(p, zp) {
 }
 
 // The avatar is framed inside a virtual box at the broadcaster's position. The canvas covers that box
-// plus generous margins (arms, hair, zoomed-in framing still fit — nothing is cut at the box edge),
+// plus generous margins (arms, hair, zoomed-in framing still fit, nothing is cut at the box edge),
 // clipped to the zone. Covering the whole monitor would make Windows copy a full-screen see-through
 // layer every frame, which is what made the avatar laggy.
+// The drawing area is the avatar's box plus generous margins (zoomed-in framing, long hair, arms, the
+// legs below a bust shot, a sideways roll… all fit) and is never cut by the zone or the screen edge,
+// it may simply hang off the screen. Its size depends only on the avatar's size, so while the
+// broadcaster drags the avatar around it just slides (no resize = no flicker). Big avatars render at a
+// lower resolution instead of costing more (pixel budget).
+const MARGIN = { side: 0.9, top: 0.6, bottom: 1.6 }; // × box height
+if (MODE === 'screen') stage.pixelBudget = 2.2e6;
 function layoutBox() {
   const zp = zonePx();
   const p = clampPos(shown, zp);
   const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
   const left = zp.x + p.x * zp.w - boxW / 2, top = zp.y + p.y * zp.h - boxH;
-  const rx = Math.max(zp.x, left - boxW * 0.8), ry = Math.max(zp.y, top - boxH * 0.35);
-  const rr = Math.min(zp.x + zp.w, left + boxW * 1.8), rb = Math.min(zp.y + zp.h, top + boxH * 1.12);
-  Object.assign($('box').style, { left: rx + 'px', top: ry + 'px', width: (rr - rx) + 'px', height: (rb - ry) + 'px' });
+  const mS = Math.round(boxH * MARGIN.side), mT = Math.round(boxH * MARGIN.top), mB = Math.round(boxH * MARGIN.bottom);
+  const w = Math.round(boxW) + 2 * mS, h = Math.round(boxH) + mT + mB;
+  const rx = left - mS, ry = top - mT;
+  const bs = $('box').style;
+  const resized = bs.width !== w + 'px' || bs.height !== h + 'px';
+  Object.assign(bs, { left: rx + 'px', top: ry + 'px', width: w + 'px', height: h + 'px' });
   Object.assign($('anchor').style, { left: left + 'px', top: top + 'px', width: boxW + 'px', height: boxH + 'px' });
   stage.setViewport({ x: left - rx, y: top - ry, w: boxW, h: boxH });
+  if (resized) stage.syncSize(); // resize + redraw now, not on the next frame
 }
 
 function animatePlacement() {
@@ -334,13 +397,13 @@ let failures = 0;      // consecutive failed attempts → backoff
 let sigFailures = 0;   // consecutive failed signalling reconnects
 const target = PEER_PREFIX + code;
 // Watchdog: a signalling server that accepts the connection but never answers would leave us
-// "Connecting…" forever — if we're not registered in time, throw the Peer away and start over.
+// "Connecting…" forever, if we're not registered in time, throw the Peer away and start over.
 let peerAttemptAt = 0, peerHangs = 0;
 setInterval(() => {
   if (stopped || !peer || peer.open || model?.open || !peerAttemptAt) return;
   if (performance.now() - peerAttemptAt < Math.min(30000, 10000 + peerHangs * 5000)) return;
   peerHangs++;
-  status('bad', `Can't reach the connection server — retrying (attempt ${peerHangs + 1})…`);
+  status('bad', `Can't reach the connection server, retrying (attempt ${peerHangs + 1})…`);
   const p = peer; peer = null;
   try { p.destroy(); } catch {}
   ensurePeer();
@@ -431,7 +494,7 @@ function openChannels() {
     if (!live()) return;
     clearTimeout(openTimeout);
     failures = 0;
-    status('ok', hasModel ? 'Connected' : 'Connected — waiting for avatar…', { autoHide: hasModel });
+    status('ok', hasModel ? 'Connected' : 'Connected, waiting for avatar…', { autoHide: hasModel });
   });
   let lastSeq = 0; // per connection: the broadcaster restarts its counter, a new channel starts at 0
   mo.on('data', (d) => {
@@ -457,6 +520,7 @@ function openChannels() {
 function closeChannels() {
   gen++;
   setGrabAllowed(false);
+  patAllowed = false;
   clearInterval(hbTimer);
   const a = model, b = motion;
   model = motion = null;
@@ -464,7 +528,7 @@ function closeChannels() {
   try { b?.close(); } catch {}
 }
 
-/** The channels are gone (or never came up): close what's left and try again later — once. */
+/** The channels are gone (or never came up): close what's left and try again later, once. */
 function channelsDown(text, maxDelay = Infinity) {
   closeChannels();
   if (stopped) return;
@@ -534,10 +598,10 @@ async function onModelData(d) {
       if (d.reason === 'kicked') { stopped = true; teardown(); status('bad', 'The broadcaster disconnected you.', { retry: true }); }
       else if (d.reason === 'full') {
         roomFullUntil = performance.now() + 10000;
-        status('warn', `This room is full (${Number(d.max) || '?'} viewers max) — you'll join as soon as a spot frees up…`);
+        status('warn', `This room is full (${Number(d.max) || '?'} viewers max). You'll join as soon as a spot frees up…`);
         scheduleRetry(10000);
       }
-      else { status('warn', 'Broadcast ended — waiting for it to start again…'); failures = 0; scheduleRetry(4000); }
+      else { status('warn', 'Broadcast ended, waiting for it to start again…'); failures = 0; scheduleRetry(4000); }
       return;
     case 'view': {
       const v = stage.setView(d);
@@ -548,13 +612,18 @@ async function onModelData(d) {
       store.set('vt-style', stage.setStyle(d));
       return;
     case 'perm':
+      patAllowed = !!d.pat;
       setGrabAllowed(!!d.grab);
+      return;
+    case 'fx': // someone else's headpat / boop
+      if (d.k === 'pat') stage.fx.patting(+d.r);
+      else if (d.k === 'boop') stage.fx.boop();
       return;
     case 'grab': // someone else (broadcaster or another viewer) pulling hair / clothes
       if (typeof d.k === 'string' && d.k !== 'me') stage.setGrab(d.k, Number.isInteger(d.j) ? d.j : -1, Array.isArray(d.p) ? d.p.slice(0, 3).map(Number) : null, true);
       return;
     case 'props':
-      if (Array.isArray(d.list)) stage.props.sync(d.list.slice(0, 64));
+      if (Array.isArray(d.list)) { lastPropList = d.list.slice(0, 64); stage.props.sync(lastPropList); renderScreenProps(lastPropList); }
       return;
     case 'prop-begin':
       incomingProps.set(d.hash, { mime: String(d.mime || ''), size: d.size, chunks: d.chunks, parts: new Array(d.chunks), got: 0 });

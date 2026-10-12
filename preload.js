@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('vt', {
   resizeBy: (factor) => ipcRenderer.send('overlay-resize-by', factor),
   setLocked: (locked) => ipcRenderer.send('overlay-set-locked', locked),
   captureMouse: (on) => ipcRenderer.send('overlay-capture-mouse', on),
+  onInteract: (cb) => ipcRenderer.on('interact-changed', (_e, on) => cb(on)),
+  openOutput: (opts) => ipcRenderer.send('output-open', opts),
+  closeOutput: () => ipcRenderer.send('output-close'),
+  onOutputClosed: (cb) => ipcRenderer.on('output-closed', () => cb()),
   onLockChanged: (cb) => ipcRenderer.on('lock-changed', (_e, locked) => cb(locked)),
   // screen mode
   onZoneEdit: (cb) => ipcRenderer.on('zone-edit', (_e, on) => cb(on)),

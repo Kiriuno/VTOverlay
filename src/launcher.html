@@ -114,12 +114,19 @@
       $('upTitle').textContent = 'Update available';
       $('upText').textContent = `Version ${r.latest} is out (you have ${r.current}). The download is about ${Math.round((r.size || 0) / 1048576)} MB and VTOverlay restarts by itself.`;
     } else if (manual) {
-      const msg = { latest: `You're up to date (v${r.current}).`, none: 'No release has been published yet.', dev: 'Running from source — update with git pull.', error: 'Update check failed: ' + r.error }[r.state];
+      const msg = { latest: `You're up to date (v${r.current}).`, none: 'No release has been published yet.', dev: 'Running from source: update with git pull.', error: 'Update check failed: ' + r.error }[r.state];
       $('checkUpdates').textContent = msg;
       setTimeout(() => ($('checkUpdates').textContent = 'Check for updates'), 5000);
     }
   }
   $('checkUpdates').onclick = () => checkUpdates(true);
+  // coming back to the start screen (or to the window) re-checks, so you never need to restart to update
+  let lastCheck = Date.now();
+  addEventListener('focus', () => {
+    if (Date.now() - lastCheck < 60000 || !$('upCancel').hidden) return;
+    lastCheck = Date.now();
+    if ($('update').hidden || $('upTitle').textContent.startsWith('Update available')) checkUpdates(false);
+  });
   $('upLater').onclick = () => { $('update').hidden = true; };
   $('upNotes').onclick = () => upInfo?.page && window.vt.openExternal(upInfo.page);
   async function startUpdate(auto) {
@@ -138,13 +145,20 @@
   $('upCancel').onclick = () => { $('upMsg').textContent = 'Cancelling…'; window.vt.cancelUpdate(); };
   window.vt.onUpdateProgress((p) => {
     $('upBar').firstElementChild.style.width = Math.round(p.fraction * 100) + '%';
-    $('upMsg').textContent = p.phase === 'download' ? `Downloading… ${Math.round(p.fraction * 100)}%` : 'Installing — VTOverlay will restart in a moment…';
+    $('upMsg').textContent = p.phase === 'download' ? `Downloading… ${Math.round(p.fraction * 100)}%` : 'Installing. VTOverlay will restart in a moment…';
     if (p.phase !== 'download') $('upCancel').hidden = true;
   });
 
   window.vt.getConfig().then((cfg) => {
     $('version').textContent = 'v' + cfg.version;
     if (cfg.justUpdated) { $('update').hidden = false; $('upTitle').textContent = `Updated to v${cfg.version} ✓`; $('upText').textContent = 'Everything is ready.'; $('upButtons').hidden = true; setTimeout(() => { $('update').hidden = true; }, 6000); }
+    else if (cfg.updateFailed) {
+      checkUpdates(false).then(() => {
+        $('update').hidden = false; $('upTitle').textContent = "The update couldn't be installed";
+        $('upText').textContent = 'Some files were still in use, so VTOverlay restarted on the version you had. Try "Update now" again in a moment. Details are in %TEMP%\\vtoverlay-update.log.';
+        $('upButtons').hidden = !(upInfo && upInfo.state === 'available');
+      });
+    }
     else checkUpdates(false, cfg.autoUpdate);
     if (cfg.receiverOnly) { $('sendCard').hidden = true; $('viewerTag').hidden = false; document.querySelector('.sub').textContent = "See a friend's avatar on your desktop, live."; document.title = 'VTOverlay Viewer'; }
     const saved = store.get('rx-display', null);

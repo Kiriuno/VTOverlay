@@ -18,7 +18,7 @@ export const FINGER_SEGMENTS = [
   ['LittleProximal', 17, 18], ['LittleIntermediate', 18, 19], ['LittleDistal', 19, 20],
 ];
 
-const Z_SCALE = 0.6; // monocular depth is noisy — damp it
+const Z_SCALE = 0.6; // monocular depth is noisy, damp it
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const r3 = (v) => Math.round(v * 1000) / 1000;
 

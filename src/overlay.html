@@ -55,6 +55,14 @@
   /* idle: the broadcaster hasn't been tracking for a while */
   body.screen #box, body.screen #anchor { transition: opacity .8s; }
   body.screen.idle #box, body.screen.idle #anchor { opacity: 0; }
+  /* props placed anywhere on the screen: below (z 1) or above (z 3) the avatar (z 2), never clickable */
+  body.screen #box { z-index: 2; }
+  #screenProps, #screenProps .layer { position: fixed; inset: 0; pointer-events: none; }
+  #screenProps .layer { perspective: 900px; }
+  #spBack { z-index: 1; } #spFront { z-index: 3; }
+  #screenProps { z-index: auto; transition: none; }
+  /* images on the screen stay when the avatar fades out for being away */
+  #screenProps .sprop { position: absolute; max-width: none; user-select: none; pointer-events: none; }
   #zoneHelp { top: 50%; transform: translate(-50%, -50%); cursor: default; font-size: 13px; padding: 14px 18px; }
 </style>
 </head>
@@ -64,6 +72,7 @@
     <div class="pill" id="status"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span><button id="retryBtn" hidden>Reconnect</button><div id="bar" hidden><i></i></div></div>
   </div>
   <div id="anchor"></div>
+  <div id="screenProps"><div class="layer" id="spBack"></div><div class="layer" id="spFront"></div></div>
   <div id="frame"></div>
   <div class="pill controls" id="help"></div>
   <div class="pill" id="shareTag"><span class="dot bad"></span>Sharing this screen with the broadcaster</div>
