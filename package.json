@@ -1,6 +1,6 @@
 {
   "name": "vtoverlay",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Stream your VTuber avatar onto a friend's desktop",
   "main": "main.js",
   "scripts": {
