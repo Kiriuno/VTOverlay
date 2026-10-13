@@ -11,11 +11,14 @@ const params = new URLSearchParams(location.search);
 const code = params.get('code');
 const MODE = params.get('mode') || 'floating';
 const viewerName = params.get('name') || '';
+// mirror: the broadcaster's own avatar on their own screen, fed by their broadcaster window
+const MIRROR = params.get('mirror') === '1';
+if (MIRROR) document.body.classList.add('mirror');
 document.body.classList.add(MODE);
 
-const store = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+const store = { // the mirror keeps its own copies, so it never changes what a real viewer remembers
+  get(k, d) { try { const v = localStorage.getItem((MIRROR ? 'mirror:' : '') + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem((MIRROR ? 'mirror:' : '') + k, JSON.stringify(v)); } catch {} },
 };
 
 // See-through windows (floating / full screen) are composited by the CPU on Windows, so keep their
@@ -29,6 +32,7 @@ window.vtStage = stage; // handy from the dev tools (and for tests)
 // ---------------- status pill ----------------
 let hasModel = false, statusTimer = null;
 function status(state, text, { autoHide = false, retry = false } = {}) {
+  if (MIRROR) { $('status').hidden = true; return; } // nothing to report on your own screen
   $('status').hidden = false;
   $('dot').className = 'dot ' + state;
   $('statusText').textContent = text;
@@ -76,6 +80,7 @@ addEventListener('resize', () => renderScreenProps(lastPropList));
 // ---------------- tell the broadcaster what we see ----------------
 let rxState = { s: 'waiting', p: 0 }, rxSentAt = 0;
 function reportRx(s, p = 0) {
+  if (MIRROR) return;
   const changed = s !== rxState.s;
   rxState = { s, p };
   // progress updates at most ~4 times a second; state changes right away
@@ -98,13 +103,13 @@ function setIdleHidden(on) {
   if (on) window.vt.reportStatus('warn', 'Avatar hidden, the broadcaster isn\'t tracking');
   else window.vt.reportStatus($('dot').className.replace('dot', '').trim() || 'ok', $('statusText').textContent || 'Connected');
 }
-if (MODE === 'screen') {
+if (MODE === 'screen' && !MIRROR) { // the mirror hides exactly when the viewer it copies does (see 'idle')
   setInterval(() => {
     if (!hasModel) { setIdleHidden(false); return; }
     if (performance.now() - lastLiveAt > IDLE_HIDE_MS) setIdleHidden(true);
   }, 1000);
 }
-const markLive = () => { lastLiveAt = performance.now(); if (idleHidden) setIdleHidden(false); };
+const markLive = () => { lastLiveAt = performance.now(); if (idleHidden && !MIRROR) setIdleHidden(false); };
 
 // ---------------- controls: mode switch + disconnect ----------------
 const MODE_LABELS = { floating: 'Floating', window: 'Window', screen: 'Full screen' };
@@ -158,19 +163,21 @@ if (MODE === 'floating') {
 // ---------------- interacting: pull hair / clothes, headpat, boop ----------------
 // Each needs the broadcaster's permission; the viewer can also switch all of it off on their side
 // (tray / control window), so clicks always go through to what's behind the avatar.
-let grabAllowed = false, patAllowed = false;
+let grabAllowed = false, patAllowed = false, slapAllowed = false;
 let localInteract = params.get('interact') !== '0';
 const canInteract = () => localInteract && hasModel && !idleHidden && !document.body.classList.contains('zoning');
 const grabber = new SpringGrabber(stage, $('stage'), {
   send: (j, p) => { try { if (model?.open) model.send({ t: 'grab', j, p }); } catch {} },
   canGrab: () => grabAllowed && canInteract(),
 });
-const sendFx = (k, r) => { try { if (model?.open) model.send({ t: 'fx', k, r }); } catch {} };
-let lastBoop = 0;
+const sendFx = (k, r, d) => { try { if (model?.open) model.send({ t: 'fx', k, r, d }); } catch {} };
+let lastBoop = 0, lastSlap = 0;
 const fxIn = new FxInput(stage.fx, $('stage'), {
   onPat: (r) => sendFx('pat', r),
   onBoop: () => { lastBoop = performance.now(); sendFx('boop'); },
+  onSlap: (dir) => { lastSlap = performance.now(); sendFx('slap', undefined, dir); },
   enabled: () => patAllowed && canInteract() && performance.now() - lastBoop > 250,
+  canSlap: () => slapAllowed && canInteract() && performance.now() - lastSlap > 300,
 });
 window.vt.onInteract((on) => { localInteract = on; if (!on) setGrabAllowed(grabAllowed); });
 // Full screen and a locked widget are click-through: they only take the mouse while it's over
@@ -368,7 +375,11 @@ stage.props.setLoader(async (hash) => {
     setTimeout(() => resolve(null), 120000);
   });
 });
-function requestProp(hash) { try { if (model?.open) model.send({ t: 'need-prop', hash }); } catch {} }
+let mirrorCh = null;
+function requestProp(hash) {
+  if (mirrorCh) { mirrorCh.postMessage({ t: 'need-prop', hash }); return; }
+  try { if (model?.open) model.send({ t: 'need-prop', hash }); } catch {}
+}
 
 async function showModel(buf, id) {
   try {
@@ -523,7 +534,7 @@ function openChannels() {
 function closeChannels() {
   gen++;
   setGrabAllowed(false);
-  patAllowed = false;
+  patAllowed = false; slapAllowed = false;
   clearInterval(hbTimer);
   const a = model, b = motion;
   model = motion = null;
@@ -616,11 +627,13 @@ async function onModelData(d) {
       return;
     case 'perm':
       patAllowed = !!d.pat;
+      slapAllowed = !!d.slap;
       setGrabAllowed(!!d.grab);
       return;
     case 'fx': // someone else's headpat / boop
       if (d.k === 'pat') stage.fx.patting(+d.r);
       else if (d.k === 'boop') stage.fx.boop();
+      else if (d.k === 'slap') stage.fx.slap(d.d);
       return;
     case 'grab': // someone else (broadcaster or another viewer) pulling hair / clothes
       if (typeof d.k === 'string' && d.k !== 'me') stage.setGrab(d.k, Number.isInteger(d.j) ? d.j : -1, Array.isArray(d.p) ? d.p.slice(0, 3).map(Number) : null, true);
@@ -647,6 +660,7 @@ async function onModelData(d) {
       return;
     }
     case 'pos':
+      if (MIRROR && d.zone && typeof d.zone === 'object') zone = { ...FULL_ZONE, ...d.zone }; // the mirrored viewer's area
       if (MODE === 'screen') { applyPos({ x: +d.x, y: +d.y, s: +d.s, tb: !!d.tb }); layoutBox(); }
       return;
     case 'model-use': {
@@ -727,4 +741,24 @@ window.vt.onShareChanged((on) => {
   if (!on && sharing) stopSharing();
 });
 
-connect();
+// ---------------- mirror (broadcaster's own screen) ----------------
+function startMirror() {
+  mirrorCh = new BroadcastChannel('vt-mirror');
+  mirrorCh.onmessage = async ({ data: d }) => {
+    if (!d || typeof d !== 'object') return;
+    switch (d.t) {
+      case 'm': stage.setMotion(d); if (d.f && !d.h) markLive(); return;
+      case 'model': if (stage.modelId !== d.id && d.buf) await showModel(d.buf, d.id); return;
+      case 'prop-img':
+        for (const resolve of propWaiters.get(d.hash) || []) resolve(d.blob);
+        propWaiters.delete(d.hash);
+        return;
+      case 'close': window.close(); return;
+      case 'idle': setIdleHidden(!!d.on); return; // the viewer's avatar faded out (or back in)
+      default: onModelData(d); // view, style, props, pos, fx, grab: same as from the network
+    }
+  };
+  mirrorCh.postMessage({ t: 'hello' });
+}
+
+if (MIRROR) startMirror(); else connect();

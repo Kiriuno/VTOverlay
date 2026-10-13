@@ -57,7 +57,7 @@ export const DEFAULT_STYLE = {
   pose: 'stand', // body pose, one of POSES
 };
 /** Body poses the broadcaster can pick (legs, hips, a bit of spine; head, face and arms stay tracked). */
-export const POSES = [['stand', 'Standing'], ['relaxed', 'Relaxed (weight on one leg)'], ['walk', 'Walking'], ['sit', 'Sitting (chair)'], ['floor', 'Sitting on the floor'], ['kneel', 'Kneeling'], ['seiza', 'Sitting back on the knees']];
+export const POSES = [['stand', 'Standing'], ['relaxed', 'Relaxed (weight on one leg)'], ['walk', 'Walking'], ['griddy', 'Griddy (dance)'], ['sit', 'Sitting (chair)'], ['sitCross', 'Sitting (chair), legs crossed'], ['floor', 'Sitting on the floor'], ['kneel', 'Kneeling'], ['seiza', 'Sitting back on the knees']];
 /** Clean up a style received from the network / storage (anything missing → default). */
 export function normalizeStyle(st = {}) {
   const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);
@@ -79,17 +79,20 @@ export function normalizeStyle(st = {}) {
     },
     fx: normalizeFx(st.fx),
     pose: POSES.some(([k]) => k === st.pose) ? st.pose : D.pose,
+    // which spring chains (by root bone name) wiggle on a slap, for model `id`; null = the ones near the bottom
+    sb: st.sb && typeof st.sb.id === 'string' && Array.isArray(st.sb.roots)
+      ? { id: st.sb.id.slice(0, 64), roots: st.sb.roots.filter((r) => typeof r === 'string').slice(0, 200).map((r) => r.slice(0, 80)) } : null,
   };
 }
 
 // Headpat / boop areas (fine-tuning by the broadcaster, in metres / multipliers, relative to what's
 // detected automatically from the model's head and eyes): hy = head area up/down, hs = head area size,
 // ny / nz = nose up/down and forward/back, ns = nose area size.
-export const DEFAULT_FX = { hy: 0, hz: 0, hs: 1, ny: 0, nz: 0, ns: 1 };
+export const DEFAULT_FX = { by: 0, bz: 0, bs: 1, hy: 0, hz: 0, hs: 1, ny: 0, nz: 0, ns: 1 };
 export function normalizeFx(fx = {}) {
   const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);
   const D = DEFAULT_FX; fx = fx || {};
-  return { hy: num(fx.hy, D.hy, -0.3, 0.3), hz: num(fx.hz, D.hz, -0.3, 0.3), hs: num(fx.hs, D.hs, 0.3, 3), ny: num(fx.ny, D.ny, -0.15, 0.15), nz: num(fx.nz, D.nz, -0.15, 0.15), ns: num(fx.ns, D.ns, 0.3, 3) };
+  return { by: num(fx.by, D.by, -0.3, 0.3), bz: num(fx.bz, D.bz, -0.3, 0.3), bs: num(fx.bs, D.bs, 0.3, 3), hy: num(fx.hy, D.hy, -0.3, 0.3), hz: num(fx.hz, D.hz, -0.3, 0.3), hs: num(fx.hs, D.hs, 0.3, 3), ny: num(fx.ny, D.ny, -0.15, 0.15), nz: num(fx.nz, D.nz, -0.15, 0.15), ns: num(fx.ns, D.ns, 0.3, 3) };
 }
 
 // Full screen viewers hide the avatar after this long without live tracking (paused, face lost, disconnected).
@@ -123,8 +126,8 @@ Messages
     broadcaster -> viewer  { t:'view', fr, zoom, px, py, yaw, el }
                            { t:'style', vg:{aa,ee,ih,oh,ou}, light:{color,i,az,el,amb,ambColor} }   (see normalizeStyle)
                            { t:'pos', x, y, s, tb }   (only used in 'screen' mode; tb = may cover the taskbar)
-                           { t:'perm', grab:boolean, pat:boolean }   may viewers pull hair / clothes? headpat & boop?
-                           { t:'fx', k:'pat'|'boop', r }   someone's headpat (sent ~every 150 ms while rubbing; r = pats/s) / boop
+                           { t:'perm', grab:boolean, pat:boolean, slap:boolean }   may viewers pull hair / clothes? headpat & boop? slap?
+                           { t:'fx', k:'pat'|'boop'|'slap', r, d }   someone's headpat (sent ~every 150 ms while rubbing; r = pats/s) / boop
                            { t:'grab', k, j, p }        someone's pull (k = 'b' broadcaster | 'v<n>' viewer; j = spring joint index,
                                                          p = avatar-local target [x,y,z], j:-1 / p:null = let go)
     viewer -> broadcaster  { t:'grab', j, p }           this viewer's pull (ignored unless allowed; relayed to the others)

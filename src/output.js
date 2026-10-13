@@ -36,7 +36,7 @@ ch.onmessage = async ({ data: d }) => {
       document.getElementById('wait').hidden = true;
       return;
     case 'grab': stage.setGrab('o' + d.k, d.j, d.p, true); return;
-    case 'fx': if (d.k === 'pat') stage.fx.patting(+d.r); else if (d.k === 'boop') stage.fx.boop(); return;
+    case 'fx': if (d.k === 'pat') stage.fx.patting(+d.r); else if (d.k === 'boop') stage.fx.boop(); else if (d.k === 'slap') stage.fx.slap(d.d); return;
   }
 };
 ch.postMessage({ t: 'hello' }); // the broadcaster answers with the model, view, look and props

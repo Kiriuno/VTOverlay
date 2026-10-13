@@ -7,7 +7,8 @@
 //   hp, hr       hips pitch (top forward) and roll (left side down)
 //   sp, sr       spine lean forward / to the left
 //   per leg (l… / r…):  F thigh forward, O thigh outward, T knee turned outward, K knee bend, A toes down
-//   per arm (la / ra):  F arm swung forward (on top of the relaxed arm pose)
+//   per arm (la / ra):  F arm swung forward, E extra elbow bend (on top of the relaxed arm pose)
+//   cy           chest turned to the left (around the vertical)
 // Hands resting somewhere (on the hip, the thighs…) are placed by IK, see poseArms.
 
 /** Leg measurements of a model (normalized bones), used to keep feet / knees / bottom on the floor. */
@@ -35,6 +36,24 @@ export function poseValues(name, t, m) {
         lK: 0.08 + 0.75 * Math.max(0, cs) ** 1.5, rK: 0.08 + 0.75 * Math.max(0, -cs) ** 1.5,
         lA: 0.2 * Math.max(0, cs) - 0.12 * Math.max(0, sn), rA: 0.2 * Math.max(0, -cs) - 0.12 * Math.max(0, -sn),
         laF: -0.32 * sn, raF: 0.32 * sn,
+      };
+    }
+    case 'griddy': { // heel taps forward, left and right, bouncing, arms swinging with bent elbows
+      const ph = t * Math.PI * 2 * 0.95, sn = Math.sin(ph), l = Math.max(0, sn), r = Math.max(0, -sn);
+      const bounce = Math.abs(Math.sin(ph)); // down on every tap
+      return {
+        bob: -0.012 * k - 0.025 * k * bounce, hz: -0.02 * k, sp: 0.16, cy: 0.18 * sn, hr: 0.03 * sn,
+        lF: 0.1 + 0.75 * l, lK: 0.3 - 0.22 * l, lA: -0.7 * l,
+        rF: 0.1 + 0.75 * r, rK: 0.3 - 0.22 * r, rA: -0.7 * r,
+        laF: 0.15 - 0.75 * sn, raF: 0.15 + 0.75 * sn, laE: 1.15, raE: 1.15,
+      };
+    }
+    case 'sitCross': { // on a chair, right leg crossed over the left knee
+      const F = 1.5, K = 1.5;
+      return {
+        hy: -(m.L1 * (1 - Math.cos(F)) + m.L2 * (1 - Math.cos(F - K))), sp: 0.06, hr: -0.03,
+        lF: F, lK: K, lO: 0.04,
+        rF: 1.92, rO: -0.32, rT: 0.15, rK: 1.75, rA: 0.35,
       };
     }
     case 'sit': {
@@ -68,11 +87,11 @@ export function poseValues(name, t, m) {
 export function poseArms(name) {
   switch (name) {
     case 'relaxed': return { l: 'hip', r: null };
-    case 'sit': return { l: 'thigh', r: 'thigh' };
+    case 'sit': case 'sitCross': return { l: 'thigh', r: 'thigh' };
     case 'seiza': return { l: 'thigh', r: 'thigh' };
     case 'floor': return { l: 'knee', r: 'knee' };
     default: return { l: null, r: null };
   }
 }
 
-export const POSE_KEYS = ['hx', 'hy', 'bob', 'hz', 'hp', 'hr', 'sp', 'sr', 'lF', 'lO', 'lT', 'lK', 'lA', 'rF', 'rO', 'rT', 'rK', 'rA', 'laF', 'raF'];
+export const POSE_KEYS = ['hx', 'hy', 'bob', 'hz', 'hp', 'hr', 'sp', 'sr', 'cy', 'lF', 'lO', 'lT', 'lK', 'lA', 'rF', 'rO', 'rT', 'rK', 'rA', 'laF', 'raF', 'laE', 'raE'];

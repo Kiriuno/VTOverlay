@@ -47,6 +47,7 @@
   #placeView { position: absolute; inset: 0; padding: 64px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
   #placeBar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   #placeBar select { width: auto; min-width: 180px; }
+  #placeBar .lbl { font-size: 12px; }
   #screenArea { flex: 1; position: relative; min-height: 0; }
   #screenBox { position: absolute; border-radius: 8px; overflow: hidden; background:
       linear-gradient(#ffffff08 1px, transparent 1px) 0 0 / 40px 40px, linear-gradient(90deg, #ffffff08 1px, transparent 1px) 0 0 / 40px 40px, #0d0b12;
@@ -73,9 +74,12 @@
   #viewers .vsee { font-size: 11px; }
   #viewers .vsee.ok { color: var(--ok); } #viewers .vsee.warn { color: var(--warn); } #viewers .vsee.bad { color: var(--bad); } #viewers .vsee.muted { color: var(--muted); }
   #viewers .vrow button { padding: 1px 8px; font-size: 12px; }
-  #viewTools { position: absolute; top: 14px; right: 14px; display: flex; gap: 6px; align-items: center; z-index: 3; }
-  #viewTools button { padding: 6px 10px; font-size: 13px; background: #0008; }
-  #viewHint { position: absolute; right: 14px; top: 54px; font-size: 12px; z-index: 3; text-align: right; background: #0006; padding: 4px 8px; border-radius: 6px; }
+  #viewTools { position: absolute; top: 14px; right: 14px; left: 290px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; z-index: 3; pointer-events: none; }
+  #viewTools .btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; pointer-events: auto; }
+  #viewTools button { padding: 6px 10px; font-size: 13px; background: #0008; white-space: nowrap; }
+  #viewTools .sep { width: 6px; }
+  #viewTools .lbl { font-size: 12px; color: var(--muted, #aaa); background: #0006; padding: 3px 6px; border-radius: 5px; }
+  #viewHint { font-size: 12px; text-align: right; background: #0006; padding: 4px 8px; border-radius: 6px; max-width: 100%; }
   #guide { position: absolute; top: 0; bottom: 0; left: 50%; transform: translateX(-50%); aspect-ratio: 0.62; border-left: 1px dashed #b48cff55; border-right: 1px dashed #b48cff55; pointer-events: none; }
   #guide span { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #b48cffaa; white-space: nowrap; }
   body.placing #viewTools, body.placing #viewHint, body.placing #guide { display: none; }
@@ -107,6 +111,8 @@
   #propGroups .grow button { padding: 2px 8px; font-size: 12px; }
   #propGroups .grow button:first-of-type { margin-left: auto; }
   .prop .more { display: none; margin-top: 8px; }
+  .vmeter { display: inline-block; width: 46px; height: 5px; border-radius: 3px; background: #ffffff1a; overflow: hidden; vertical-align: middle; margin-left: 6px; }
+  .vmeter i { display: block; height: 100%; width: 0; background: var(--accent); }
   .prop.sel .more { display: block; }
   .prop select { padding: 5px 6px; font-size: 12px; }
   .prop .slider { grid-template-columns: 70px 1fr; font-size: 12px; }
@@ -144,6 +150,8 @@
   .meter i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width .1s; }
   .meter b { position: absolute; top: 0; bottom: 0; left: 12%; width: 1px; background: var(--muted); }
   .slider.dual input { width: 100%; min-width: 0; }
+  .calRow { display: flex; gap: 6px; align-items: center; margin: -2px 0 8px; font-size: 11px; }
+  .calRow .mini { padding: 2px 8px; font-size: 11px; }
   .slider.dual.head { padding: 0; } .slider.dual.head small { font-size: 10px; color: var(--muted); text-align: center; }
   #modelName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
 </style>
@@ -156,14 +164,17 @@
     <div id="trackState"><span class="dot" id="trackDot"></span><span id="trackText">Starting camera…</span></div>
     <video id="cam" playsinline muted></video>
     <div id="guide"><span>what viewers see (widget / full screen)</span></div>
-    <div id="viewTools"><button id="frBtn">Bust</button><button id="resetView">Reset view</button></div>
-    <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: turn (Shift: roll) · Left-drag hair / clothes: pull<br>Viewers see exactly this framing</div>
+    <div id="viewTools">
+      <div class="btns"><button id="frBtn">Bust</button><span class="sep"></span><span class="lbl">Reset</span><button data-reset="pos">Position</button><button data-reset="size">Size</button><button data-reset="rot">Rotation</button><button data-reset="all">All</button></div>
+      <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: turn (Shift: roll) · Left-drag hair / clothes: pull<br>Viewers see exactly this framing</div>
+    </div>
     <div id="pausedBanner" hidden><b>⏸︎ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling<br>(full-screen viewers hide it after 30 s)</div></div>
     <div id="tabs"><button data-tab="avatar" class="on">My avatar</button><button data-tab="place">Place on viewer's screen</button></div>
     <div id="placeView" hidden>
       <div id="placeBar">
         <select id="viewerSel"></select>
-        <button id="resetPos">Reset position</button>
+        <span class="lbl muted">Reset</span><span id="resetPosBtns"><button data-reset="pos">Position</button> <button data-reset="size">Size</button> <button data-reset="all">All</button></span>
+        <button id="mirrorBtn" hidden title="Shows your avatar full screen on your own monitor, at the same place and size as on the viewer selected here (click-through, like theirs). Only for a viewer in Full screen mode.">Show on my screen</button><select id="mirrorDisplay" hidden title="Which of your screens"></select>
         <button id="placeAdd" title="Add an image to their screen (you can also drop images here)">Add image…</button><input type="file" id="placeFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
 
         <span class="muted hint">Drag the avatar or an image to move it (the avatar's feet snap onto the taskbar; keep pushing to go over it) · scroll to resize</span>
@@ -213,6 +224,11 @@
       <div class="row" style="margin-top:8px"><button id="calib">Calibrate (look straight, relaxed face)</button></div>
       <label class="toggle">Hide webcam preview <input type="checkbox" id="hideCam"></label>
       <label class="toggle">Auto expressions from your face <input type="checkbox" id="autoExpr"></label>
+      <label class="toggle" title="Your microphone opens the avatar's mouth while you talk (on top of face tracking, handy when the camera misses your mouth)">Move mouth with my voice <input type="checkbox" id="voiceMouth"></label>
+      <div id="voiceRow" hidden>
+        <select id="micSel"></select>
+        <div class="slider" title="Higher = the mouth opens more for quiet speech"><span>Voice sensitivity <span class="vmeter"><i id="voiceMeter"></i></span></span><input type="range" id="voiceGain" min="0.3" max="3" step="0.05"></div>
+      </div>
       <label class="toggle">Track arms &amp; hands <span class="badge" style="margin-left:6px">beta</span><input type="checkbox" id="arms" style="margin-left:auto"></label>
       <div class="hint muted" id="armsHint" hidden>Keep your shoulders and hands in the camera view. Uses more CPU/GPU.</div>
       <div class="slider" id="armSmoothRow" hidden title="Higher = steadier arms and fingers, a little more delay"><span>Arm &amp; hand smoothing</span><input type="range" id="armSmoothing" min="0" max="1" step="0.05" value="0.6"></div>
@@ -245,7 +261,7 @@
       <div class="hint muted" style="margin:-2px 0 8px">Click to toggle · <b>right-click</b> one to give it a hotkey (works from any app)</div>
       <div class="row" id="xrow"></div>
       <details id="autoTune" style="margin-top:8px"><summary>Auto expressions: sensitivity</summary>
-        <div class="hint muted" style="margin:4px 0">Needs <b>Auto expressions from your face</b> (Tracking). The bars show what's read from your face right now; the strongest one past the mark shows on your avatar. Raise one that never triggers, lower one that triggers too easily. Calibrating with a relaxed face helps a lot.</div>
+        <div class="hint muted" style="margin:4px 0">Needs <b>Auto expressions from your face</b> (Tracking). The bars show what's read from your face right now; the strongest one past the mark shows on your avatar. Raise one that never triggers, lower one that triggers too easily. Calibrating with a relaxed face helps a lot. If one never goes all the way, <b>Calibrate</b> it: make that face the way you normally would, click, hold it for 2 seconds; that becomes its full strength.</div>
         <div id="autoRows"></div>
         <button class="mini" id="autoReset" style="margin-top:4px">Reset</button>
       </details>
@@ -297,8 +313,15 @@
     <details class="sec" data-sec="interact"><summary><h3>Interactions</h3></summary>
       <label class="toggle" title="Viewers can pull your avatar's hair, clothes, ribbons… with their mouse. Everyone sees it.">Let viewers grab hair &amp; clothes <input type="checkbox" id="viewerGrab"></label>
       <label class="toggle" title="Rubbing the mouse over the head = headpat (squish + patting hand). Clicking the nose = boop (tiny stars).">Let viewers headpat &amp; boop <input type="checkbox" id="viewerPat"></label>
+      <label class="toggle" title="A quick swipe of the mouse across your avatar's bottom (seen from the side or behind) = a slap: skirt, tail… wiggle, the legs wobble a little. Clicking there still grabs the springs.">Let viewers slap your bottom <input type="checkbox" id="viewerSlap"></label>
+      <details id="slapPick"><summary>Spring bones that wiggle on a slap</summary>
+        <div class="hint muted" style="margin:4px 0">Saved for each avatar. <b>Auto</b> picks the ones near the bottom or hanging off the hips; untick it to choose them yourself (the number is how many bones are in that chain).</div>
+        <label class="toggle">Auto <input type="checkbox" id="slapAuto" checked></label>
+        <div id="slapBones" style="max-height:220px;overflow:auto"></div>
+        <button class="mini" id="slapTest" style="margin-top:6px">Test slap in my preview</button>
+      </details>
       <div class="hint muted" style="margin:2px 0 6px">You can pull hair in your preview too (headpats and boops are for viewers). Viewers can switch interactions off on their side.</div>
-      <details id="fxAreas"><summary>Adjust headpat &amp; boop areas</summary>
+      <details id="fxAreas"><summary>Adjust headpat, boop &amp; slap areas</summary>
         <div class="hint muted" style="margin:4px 0">The areas are found from your model's head and eyes; nudge them if they're off. They're outlined in the preview while this is open.</div>
         <div class="slider"><span>Head area ↕</span><input type="range" id="fxHy" min="-0.3" max="0.3" step="0.005"></div>
         <div class="slider"><span>Head area forward ↔ back</span><input type="range" id="fxHz" min="-0.3" max="0.3" step="0.005"></div>
@@ -306,6 +329,9 @@
         <div class="slider"><span>Nose ↕</span><input type="range" id="fxNy" min="-0.15" max="0.15" step="0.002"></div>
         <div class="slider"><span>Nose forward ↔ back</span><input type="range" id="fxNz" min="-0.15" max="0.15" step="0.002"></div>
         <div class="slider"><span>Nose size</span><input type="range" id="fxNs" min="0.3" max="3" step="0.05"></div>
+        <div class="slider"><span>Bottom ↕</span><input type="range" id="fxBy" min="-0.3" max="0.3" step="0.005"></div>
+        <div class="slider"><span>Bottom closer ↔ further back</span><input type="range" id="fxBz" min="-0.3" max="0.3" step="0.005"></div>
+        <div class="slider"><span>Bottom size</span><input type="range" id="fxBs" min="0.3" max="3" step="0.05"></div>
         <button class="mini" id="fxReset">Reset areas</button>
       </details>
     </details>

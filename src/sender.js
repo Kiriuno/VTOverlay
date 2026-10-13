@@ -2,7 +2,7 @@
 // The webcam image never leaves this page; only numbers are sent.
 import * as THREE from 'three';
 import { FaceLandmarker, PoseLandmarker, HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { AvatarStage, autoExpression } from './shared/avatar.js';
+import { AvatarStage, autoExpression, ExprBaseline } from './shared/avatar.js';
 import {
   ARKIT, PEER_PREFIX, HOTKEY_EXPRESSIONS, MODEL_CHUNK, DEFAULT_POS, DEFAULT_VIEW, AVATAR_ASPECT, effectiveZone,
   VISEMES, AUTO_EXPR, POSES, DEFAULT_STYLE, DEFAULT_FX, normalizeStyle, IS_DEV, DEV_CODE,
@@ -24,7 +24,7 @@ const SEND_INTERVAL_MS = 33; // ~30 Hz
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, viewerSlap: false, voiceMouth: false, voiceGain: 1, micId: '', exprCal: {}, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -68,13 +68,50 @@ const applyToggles = () => {
   $('armSmoothRow').hidden = !settings.arms;
   if (settings.arms) initBodyTrackers();
 };
-for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab', 'viewerPat']) {
+// which spring chains wiggle on a slap (per model; default: the ones near the bottom)
+function renderSlapBones() {
+  const box = $('slapBones');
+  const chains = stage.vrm ? stage.fx.chainList() : [];
+  const pick = style.sb && style.sb.id === modelId ? new Set(style.sb.roots) : null;
+  $('slapAuto').checked = !pick;
+  if (!chains.length) { box.innerHTML = `<div class="muted hint">${stage.vrm ? 'This avatar has no spring bones.' : 'Load an avatar first.'}</div>`; return; }
+  const seen = new Map();
+  box.innerHTML = chains.map((c) => {
+    const n = (seen.get(c.name) || 0) + 1; seen.set(c.name, n);
+    const esc = c.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    return n > 1 ? '' : `<label class="toggle"><span>${esc} <span class="muted">(${c.joints})</span></span><input type="checkbox" data-root="${esc}" ${pick?.has(c.name) ? 'checked' : ''} ${pick ? '' : 'disabled'}></label>`;
+  }).join('');
+}
+function setSlapRoots(roots) { // null = auto
+  if (!modelId) return;
+  settings.slapRoots = settings.slapRoots || {};
+  if (roots) settings.slapRoots[modelId] = roots; else delete settings.slapRoots[modelId];
+  updateStyle({ sb: roots ? { id: modelId, roots } : null });
+}
+$('slapAuto').onchange = () => {
+  // switching Auto off starts from what Auto was picking, so nothing changes until you untick something
+  if ($('slapAuto').checked) setSlapRoots(null);
+  else { stage.fx.slap(); stage.fx.slapAt = -1e9; setSlapRoots([...new Set((stage.fx.slapChains || []).map((c) => c[0].bone.name || 'chain'))]); }
+  renderSlapBones();
+};
+$('slapBones').addEventListener('change', (e) => {
+  const cb = e.target.closest('[data-root]');
+  if (!cb || !modelId) return;
+  const roots = new Set(style.sb?.id === modelId ? style.sb.roots : []);
+  if (cb.checked) roots.add(cb.dataset.root); else roots.delete(cb.dataset.root);
+  setSlapRoots([...roots]);
+});
+queueMicrotask(renderSlapBones); // once the preview exists
+$('slapTest').onclick = () => { stage.fx.slap(); toOutput({ t: 'fx', k: 'slap' }); };
+
+const permMsg = () => ({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat, slap: !!settings.viewerSlap });
+for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab', 'viewerPat', 'viewerSlap']) {
   $(k).checked = settings[k];
   $(k).onchange = () => {
     settings[k] = $(k).checked; saveSettings(); applyToggles();
     if (k === 'arms' && !paused) openCamera(); // switch camera resolution (720p for hands)
     if (k === 'viewerGrab') setViewerGrab(settings.viewerGrab);
-    if (k === 'viewerPat') broadcastControl({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat });
+    if (k === 'viewerPat' || k === 'viewerSlap') broadcastControl(permMsg());
   };
 }
 for (const k of ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'smoothing', 'bodyX', 'bodyY', 'bodyZ', 'armSmoothing']) {
@@ -121,7 +158,7 @@ showRoll();
 let style = stage.setStyle(settings.style);
 let styleSendTimer = null;
 function updateStyle(patch) {
-  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx }, pose: patch.pose ?? style.pose });
+  style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx }, pose: patch.pose ?? style.pose, sb: 'sb' in patch ? patch.sb : style.sb });
   settings.style = style; saveSettings();
   if (!styleSendTimer) styleSendTimer = setTimeout(() => { styleSendTimer = null; broadcastControl({ t: 'style', ...style }); }, 80);
   showStyle();
@@ -136,10 +173,110 @@ for (const [k] of VISEMES) {
 $('vowelReset').onclick = () => updateStyle({ vg: DEFAULT_STYLE.vg, vm: DEFAULT_STYLE.vm });
 // auto expressions: sensitivity per emotion + a live meter of what's read from your face
 $('autoRows').innerHTML = AUTO_EXPR.map(([k, l]) =>
-  `<div class="slider dual"><span>${l} <output id="agOut_${k}"></output></span><input type="range" id="ag_${k}" min="0" max="3" step="0.05" title="Sensitivity"><span class="meter" title="Read from your face now (the line is where it starts to show)"><i id="agBar_${k}"></i><b></b></span></div>`).join('');
+  `<div class="slider dual"><span>${l} <output id="agOut_${k}"></output></span><input type="range" id="ag_${k}" min="0" max="3" step="0.05" title="Sensitivity"><span class="meter" title="Read from your face now (the line is where it starts to show)"><i id="agBar_${k}"></i><b></b></span></div>` +
+  `<div class="calRow"><button class="mini" id="cal_${k}" title="Make this face as you'd normally do it, then click: that becomes your full ${l.toLowerCase()}">Calibrate</button><button class="mini" id="calReset_${k}">Reset</button><span class="muted" id="calText_${k}"></span></div>`).join('');
 for (const [k] of AUTO_EXPR) $('ag_' + k).oninput = (e) => updateStyle({ ag: { [k]: +e.target.value } });
 $('autoReset').onclick = () => updateStyle({ ag: DEFAULT_STYLE.ag });
+// calibration: you make the face, it records how strongly your face reads it, which then counts as "full"
+let autoRaw = null, calibrating = null; // calibrating = { k, vals, until }
+function showCal() {
+  for (const [k] of AUTO_EXPR) {
+    const on = settings.exprCal[k] > 0, busy = calibrating?.k === k;
+    $('calReset_' + k).hidden = !on || busy;
+    $('cal_' + k).disabled = !!calibrating && !busy;
+    if (!busy) { $('cal_' + k).textContent = on ? 'Recalibrate' : 'Calibrate'; $('calText_' + k).textContent = on ? 'calibrated' : ''; }
+  }
+}
+for (const [k, label] of AUTO_EXPR) {
+  $('cal_' + k).onclick = () => {
+    if (calibrating) return;
+    calibrating = { k, vals: [], until: performance.now() + 2500 };
+    $('cal_' + k).textContent = 'Hold it…';
+    $('calText_' + k).textContent = 'make your ' + label.toLowerCase() + ' face';
+    showCal();
+    const tick = setInterval(() => {
+      if (performance.now() < calibrating.until) return;
+      clearInterval(tick);
+      const v = calibrating.vals.sort((a, b) => a - b), ok = v.length >= 5 ? v[Math.floor(v.length * 0.75)] : 0;
+      calibrating = null;
+      if (ok > 0.05) { settings.exprCal[k] = +ok.toFixed(4); saveSettings(); showCal(); }
+      else { showCal(); $('calText_' + k).textContent = v.length < 5 ? 'no face seen, try again' : "couldn't see it, try a stronger face"; }
+    }, 100);
+  };
+  $('calReset_' + k).onclick = () => { delete settings.exprCal[k]; saveSettings(); showCal(); };
+}
+showCal();
+// ---- mouth from the microphone (optional) ----
+const voice = { an: null, ctx: null, stream: null, td: null, fd: null, level: 0, tone: 0.5, at: 0 };
+const VOICE_IDX = { funnel: ARKIT.indexOf('mouthFunnel'), sl: ARKIT.indexOf('mouthStretchLeft'), sr: ARKIT.indexOf('mouthStretchRight') };
+async function startVoice() {
+  stopVoice();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: settings.micId ? { exact: settings.micId } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const ctx = new AudioContext(), an = ctx.createAnalyser();
+    an.fftSize = 1024; an.smoothingTimeConstant = 0.2;
+    ctx.createMediaStreamSource(stream).connect(an);
+    Object.assign(voice, { stream, ctx, an, td: new Float32Array(an.fftSize), fd: new Float32Array(an.frequencyBinCount), level: 0, at: performance.now() });
+    listMics();
+  } catch (err) {
+    settings.voiceMouth = false; $('voiceMouth').checked = false; $('voiceRow').hidden = true; saveSettings();
+    alert('Could not open the microphone: ' + err.message);
+  }
+}
+function stopVoice() {
+  voice.stream?.getTracks().forEach((tr) => tr.stop());
+  voice.ctx?.close().catch(() => {});
+  Object.assign(voice, { an: null, ctx: null, stream: null, level: 0 });
+  $('voiceMeter').style.width = '0';
+}
+/** How loud you're talking (0..1) and how bright it sounds, read from the microphone right now. */
+function readVoice() {
+  const now = performance.now(), dt = Math.min(0.2, (now - voice.at) / 1000); voice.at = now;
+  voice.an.getFloatTimeDomainData(voice.td);
+  let sum = 0; for (const x of voice.td) sum += x * x;
+  const db = 10 * Math.log10(sum / voice.td.length + 1e-12);
+  const target = Math.min(1, Math.max(0, (db + 52) / 28) * settings.voiceGain);
+  voice.level += (target - voice.level) * (1 - Math.exp(-dt * (target > voice.level ? 30 : 12))); // opens fast, closes a bit slower
+  // brightness (spectral centroid, 150 Hz..4 kHz): dark sounds round the lips, bright ones stretch them
+  voice.an.getFloatFrequencyData(voice.fd);
+  const hz = voice.ctx.sampleRate / voice.an.fftSize;
+  let wsum = 0, msum = 0;
+  for (let i = Math.floor(150 / hz); i < Math.min(voice.fd.length, Math.ceil(4000 / hz)); i++) { const m = 10 ** (voice.fd[i] / 20); wsum += m * i * hz; msum += m; }
+  const tone = msum > 0 ? Math.min(1, Math.max(0, (wsum / msum - 600) / 1400)) : 0.5;
+  voice.tone += (tone - voice.tone) * (1 - Math.exp(-dt * 10));
+  $('voiceMeter').style.width = Math.round(voice.level * 100) + '%';
+}
+function applyVoice(b) {
+  readVoice();
+  const L = voice.level;
+  if (L < 0.02) return;
+  b[JAW_IDX] = Math.max(b[JAW_IDX], L * 0.75);
+  b[VOICE_IDX.funnel] = Math.max(b[VOICE_IDX.funnel], L * 0.45 * (1 - voice.tone));
+  const st = L * 0.4 * voice.tone;
+  b[VOICE_IDX.sl] = Math.max(b[VOICE_IDX.sl], st); b[VOICE_IDX.sr] = Math.max(b[VOICE_IDX.sr], st);
+}
+async function listMics() {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+  $('micSel').innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${(d.label || 'Microphone ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
+  const cur = voice.stream?.getAudioTracks()[0]?.getSettings().deviceId;
+  $('micSel').value = settings.micId && devs.some((d) => d.deviceId === settings.micId) ? settings.micId : (cur || '');
+}
+$('voiceMouth').checked = settings.voiceMouth;
+$('voiceRow').hidden = !settings.voiceMouth;
+$('voiceGain').value = settings.voiceGain;
+$('voiceMouth').onchange = () => {
+  settings.voiceMouth = $('voiceMouth').checked; saveSettings();
+  $('voiceRow').hidden = !settings.voiceMouth;
+  if (settings.voiceMouth) startVoice(); else stopVoice();
+};
+$('voiceGain').oninput = () => { settings.voiceGain = +$('voiceGain').value; saveSettings(); };
+$('micSel').onchange = () => { settings.micId = $('micSel').value; saveSettings(); startVoice(); };
+// the meter keeps moving even while no face is tracked, so you can set it up
+setInterval(() => { if (voice.an && performance.now() - voice.at > 120) readVoice(); }, 100);
+if (settings.voiceMouth) startVoice();
+
 let autoScores = null; // what the auto expressions read from your face (set per tracked frame)
+const exprBase = new ExprBaseline(); // your relaxed face, learned as you go
 (function meters() {
   requestAnimationFrame(meters);
   if (!$('autoTune').open) return;
@@ -185,7 +322,7 @@ $('lightDelPreset').onclick = () => {
 renderLightPresets();
 
 // headpat / boop areas (fine-tuning; outlined in the preview while the panel is open)
-const FX_INPUTS = { fxHy: 'hy', fxHz: 'hz', fxHs: 'hs', fxNy: 'ny', fxNz: 'nz', fxNs: 'ns' };
+const FX_INPUTS = { fxBy: 'by', fxBz: 'bz', fxBs: 'bs', fxHy: 'hy', fxHz: 'hz', fxHs: 'hs', fxNy: 'ny', fxNz: 'nz', fxNs: 'ns' };
 for (const [id, k] of Object.entries(FX_INPUTS)) $(id).oninput = (e) => updateStyle({ fx: { [k]: +e.target.value } });
 $('fxReset').onclick = () => updateStyle({ fx: DEFAULT_FX });
 $('poseSel').innerHTML = POSES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('');
@@ -210,7 +347,19 @@ function showStyle() {
 showStyle();
 showLimits();
 $('frBtn').onclick = () => updateView({ fr: view.fr === 'full' ? 'bust' : 'full', px: 0, py: 0 });
-$('resetView').onclick = () => { updateView({ ...DEFAULT_VIEW, fr: view.fr, roll: view.roll }); showRoll(); }; // roll has its own buttons
+// reset buttons: Position / Size / Rotation / All
+function resetButtons(container, onPick) {
+  container.addEventListener('click', (e) => { const b = e.target.closest('[data-reset]'); if (b) onPick(b.dataset.reset); });
+}
+resetButtons(document.querySelector('#viewTools .btns'), (what) => {
+  const D = DEFAULT_VIEW;
+  if (what === 'pos') updateView({ px: D.px, py: D.py });
+  else if (what === 'size') updateView({ zoom: D.zoom });
+  else if (what === 'rot') updateView({ yaw: D.yaw, el: D.el });
+  else updateView({ ...D, fr: view.fr });
+  showRoll();
+});
+
 
 const canvas = $('stage');
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -264,6 +413,9 @@ async function useModel(buf, name) {
     const info = await stage.loadVRM(buf.slice(0), id);
     modelBuf = buf; modelName = name; modelId = id;
     loadModelProfile(id, name);
+    const roots = (settings.slapRoots || {})[id];
+    updateStyle({ sb: Array.isArray(roots) ? { id, roots } : null });
+    renderSlapBones();
     $('empty').hidden = true;
     $('modelName').textContent = name;
     $('modelName').classList.remove('muted');
@@ -652,7 +804,7 @@ function relayGrab(fromId, msg) {
   for (const [id, v] of viewers) if (id !== fromId && v.model?.open) { try { v.model.send(msg); } catch {} }
 }
 function setViewerGrab(on) {
-  broadcastControl({ t: 'perm', grab: on, pat: !!settings.viewerPat });
+  broadcastControl(permMsg());
   if (!on) for (const v of viewers.values()) {
     if (!stage.grabs.has('v' + v.n)) continue;
     stage.setGrab('v' + v.n, -1, null);
@@ -663,18 +815,70 @@ function setViewerGrab(on) {
 // ---- camera output window (for OBS / a virtual camera): mirrors what viewers get, locally ----
 const outCh = new BroadcastChannel('vt-output');
 let outputOpen = false;
-const toOutput = (msg) => { if (outputOpen) { try { outCh.postMessage(msg); } catch {} } };
-outCh.onmessage = async ({ data: d }) => {
-  if (d?.t === 'hello') {
-    outputOpen = true;
-    if (modelBuf) outCh.postMessage({ t: 'model', id: modelId, buf: modelBuf.slice(0) });
-    outCh.postMessage({ t: 'view', ...view });
-    outCh.postMessage({ t: 'style', ...style });
-    outCh.postMessage({ t: 'props', list: publicProps() });
-    showOutputState(true);
-  }
-  if (d?.t === 'need-prop') { const blob = await getPropImage(String(d.hash)); if (blob) outCh.postMessage({ t: 'prop-img', hash: d.hash, blob }); }
+// …and the mirror (your avatar on your own screen, placed like on the viewer you picked) gets the same
+const mirCh = new BroadcastChannel('vt-mirror');
+let mirrorOpen = false;
+const toOutput = (msg) => {
+  if (outputOpen) { try { outCh.postMessage(msg); } catch {} }
+  if (mirrorOpen) { try { mirCh.postMessage(msg); } catch {} }
 };
+const localPageHandler = (ch, onHello) => async ({ data: d }) => {
+  if (d?.t === 'hello') {
+    if (modelBuf) ch.postMessage({ t: 'model', id: modelId, buf: modelBuf.slice(0) });
+    ch.postMessage({ t: 'view', ...view });
+    ch.postMessage({ t: 'style', ...style });
+    ch.postMessage({ t: 'props', list: publicProps() });
+    onHello();
+  }
+  if (d?.t === 'need-prop') { const blob = await getPropImage(String(d.hash)); if (blob) ch.postMessage({ t: 'prop-img', hash: d.hash, blob }); }
+};
+outCh.onmessage = localPageHandler(outCh, () => showOutputState(true));
+mirCh.onmessage = localPageHandler(mirCh, () => { mirrorOpen = true; mirrorPos(); showMirrorState(true); });
+let lastMirrorPos = '';
+// only for a viewer in Full screen mode: if they leave it (or leave), yours goes away too
+const mirrorTarget = () => { const v = viewers.get(selectedViewer); return v && v.state?.mode === 'screen' && (v.motion?.open || v.model?.open) ? v : null; };
+let displayCount = 1;
+let mirrorGoneTimer = null;
+function syncMirror() {
+  const ok = !!mirrorTarget();
+  // a short reconnect isn't "leaving": give it a few seconds before closing yours
+  if (ok) { clearTimeout(mirrorGoneTimer); mirrorGoneTimer = null; }
+  else if (mirrorOpen && !mirrorGoneTimer) mirrorGoneTimer = setTimeout(() => { mirrorGoneTimer = null; if (!mirrorTarget() && mirrorOpen) { window.vt.closeMirror(); showMirrorState(false); syncMirror(); } }, 6000);
+  const show = ok || (mirrorOpen && !!mirrorGoneTimer);
+  $('mirrorBtn').hidden = !show;
+  $('mirrorDisplay').hidden = !show || displayCount < 2;
+  mirrorPos();
+}
+function mirrorPos() {
+  if (!mirrorOpen) return;
+  const v = mirrorTarget();
+  if (!v) return;
+  const p = { ...v.pos, zone: v.state?.zone };
+  const msg = { t: 'pos', x: p.x, y: p.y, s: p.s, tb: !!p.tb, zone: p.zone || null };
+  const idle = v.rx?.s === 'hidden'; // their avatar faded out (no tracking for 30 s): so does yours
+  const key = JSON.stringify(msg) + idle;
+  if (key === lastMirrorPos) return;
+  lastMirrorPos = key;
+  try { mirCh.postMessage(msg); mirCh.postMessage({ t: 'idle', on: idle }); } catch {}
+}
+function showMirrorState(open) {
+  mirrorOpen = open;
+  if (!open) lastMirrorPos = '';
+  $('mirrorBtn').textContent = open ? 'Hide from my screen' : 'Show on my screen';
+  $('mirrorBtn').classList.toggle('on', open);
+}
+$('mirrorBtn').onclick = () => {
+  if (mirrorOpen) { window.vt.closeMirror(); showMirrorState(false); return; }
+  if (!mirrorTarget()) return;
+  window.vt.openMirror({ displayId: Number($('mirrorDisplay').value) || 0 });
+};
+window.vt.onMirrorClosed(() => showMirrorState(false));
+window.vt.getConfig().then((cfg) => {
+  const list = cfg.displays || [];
+  $('mirrorDisplay').innerHTML = list.map((d) => `<option value="${d.id}">${d.label.replace(/</g, '&lt;')}</option>`).join('');
+  displayCount = list.length;
+  syncMirror();
+});
 function showOutputState(open) {
   outputOpen = open;
   $('outputBtn').textContent = open ? 'Close camera output' : 'Open camera output';
@@ -792,9 +996,17 @@ function onViewerMessage(id, v, d) {
   v.lastHeard = performance.now();
   if (!d || typeof d !== 'object') return;
   if (d.t === 'bye') { dropViewer(id); return; }
-  if (d.t === 'fx') { // a viewer's headpat / boop
-    if (!settings.viewerPat || (d.k !== 'pat' && d.k !== 'boop')) return;
+  if (d.t === 'fx') { // a viewer's headpat / boop / slap
     const now = performance.now();
+    if (d.k === 'slap') {
+      if (!settings.viewerSlap || now - (v.lastSlap || 0) < 300) return;
+      v.lastSlap = now;
+      const dir = Array.isArray(d.d) && d.d.length === 3 && d.d.every((x) => Number.isFinite(+x)) ? d.d.map((x) => Math.max(-1, Math.min(1, +x))) : null;
+      stage.fx.slap(dir);
+      relayGrab(id, { t: 'fx', k: 'slap', d: dir });
+      return;
+    }
+    if (!settings.viewerPat || (d.k !== 'pat' && d.k !== 'boop')) return;
     if (d.k === 'boop' && now - (v.lastBoop || 0) < 250) return; // no machine-gun boops
     if (d.k === 'boop') v.lastBoop = now;
     const r = Number.isFinite(+d.r) ? +d.r : undefined; // pat speed
@@ -810,7 +1022,7 @@ function onViewerMessage(id, v, d) {
     relayGrab(id, { t: 'grab', k: 'v' + v.n, j, p });
     return;
   }
-  if (d.t === 'rx') { v.rx = { s: String(d.s), p: Math.max(0, Math.min(1, +d.p || 0)) }; updateViewers(); return; }
+  if (d.t === 'rx') { v.rx = { s: String(d.s), p: Math.max(0, Math.min(1, +d.p || 0)) }; updateViewers(); mirrorPos(); return; }
   if (d.t === 'need-model') { if (v.model?.open) sendModel(v.model); return; }
   if (d.t === 'need-prop') { if (v.model?.open) sendPropImage(v.model, String(d.hash)); return; }
   if (d.t !== 'viewer') return;
@@ -826,7 +1038,7 @@ function onViewerMessage(id, v, d) {
     v.model.send({ t: 'props', list: publicProps() });
     v.model.send({ t: 'view', ...view });
     v.model.send({ t: 'style', ...style });
-    v.model.send({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat });
+    v.model.send(permMsg());
     offerModel(v);
   }
   updateViewers();
@@ -980,6 +1192,7 @@ function clampPos(p, zp) {
 }
 
 function renderPlacement() {
+  syncMirror();
   if ($('placeView').hidden) return;
   const v = viewers.get(selectedViewer);
   const msg = $('placeMsg');
@@ -1085,7 +1298,13 @@ $('screenArea').addEventListener('wheel', (e) => {
 }, { passive: false });
 $('placeAdd').onclick = () => $('placeFile').click();
 $('placeFile').onchange = async () => { for (const f of $('placeFile').files) await addPropFile(f, { onScreen: true }); $('placeFile').value = ''; };
-$('resetPos').onclick = () => { const v = viewers.get(selectedViewer); if (v) updatePos(v, { ...DEFAULT_POS, tb: true, y: taskbarSnapY(v) ?? 1 }); };
+resetButtons($('resetPosBtns'), (what) => {
+  const v = viewers.get(selectedViewer);
+  if (!v) return;
+  if (what === 'size') updatePos(v, { s: DEFAULT_POS.s }); // feet stay where they are
+  else if (what === 'pos') updatePos(v, { x: DEFAULT_POS.x, tb: true, y: taskbarSnapY(v) ?? 1 });
+  else updatePos(v, { ...DEFAULT_POS, tb: true, y: taskbarSnapY(v) ?? 1 });
+});
 
 // ---------------- props (2D images in the scene or on the model) ----------------
 // Defs are what viewers receive (see shared/props.js). File names stay on this computer.
@@ -1237,8 +1456,10 @@ function renderPropList() {
     if (thumb) row.querySelector('img').src = thumb;
     else getPropImage(d.img).then((b) => { if (b) { const u = URL.createObjectURL(b); propThumbs.set(d.img, u); row.querySelector('img').src = u; } });
     row.querySelector('.nm').textContent = propLabels[d.id] || 'Prop';
-    row.querySelector('.nm').onclick = () => selectProp(selectedProp === d.id ? null : d.id);
-    row.querySelector('img').onclick = () => selectProp(d.id);
+    // clicking the prop's bar (anywhere but its buttons) opens its settings, clicking again closes them
+    const top = row.querySelector('.top');
+    top.style.cursor = 'pointer';
+    top.onclick = (e) => { if (!e.target.closest('button')) selectProp(selectedProp === d.id ? null : d.id); };
     row.querySelector('[data-a=vis]').onclick = () => updateProp(d.id, { visible: !d.visible });
     row.querySelector('[data-a=lock]').onclick = () => { updateProp(d.id, { locked: !d.locked }); if (d.locked && selectedProp === d.id) selectProp(null); };
     row.querySelector('[data-a=hk]').onclick = () => bindHotkey('prop:' + d.id, `Hotkey to show / hide “${propLabels[d.id] || 'prop'}”`);
@@ -1583,10 +1804,14 @@ function buildFrame(result, nowMs) {
   for (const i of BLINK_IDX) b[i] = Math.min(1, Math.max(0, (b[i] - blinkFloor) * settings.blinkGain * 1.3));
   if (settings.linkEyes) { const m = (b[BLINK_IDX[0]] + b[BLINK_IDX[1]]) / 2; b[BLINK_IDX[0]] = b[BLINK_IDX[1]] = m; }
   b[JAW_IDX] = Math.min(1, b[JAW_IDX] * settings.mouthGain);
+  if (voice.an) applyVoice(b);
   // per-expression tuning: e.g. a closed-eye "joy" face shouldn't blink, a pout shouldn't open the mouth
   // Auto expressions use their expression's tuning too, as strongly as the expression shows. They're
   // read here, before the tuning, so e.g. tuning the smile away for "happy" doesn't switch happy off.
-  const auto = autoExpression(b, style.ag);
+  const auto = autoExpression(b, style.ag, exprBase.update(b, Math.min(0.2, (t - (exprBase.t ?? t)) || 0.033)), settings.exprCal);
+  autoRaw = auto.raw;
+  if (calibrating && performance.now() < calibrating.until) calibrating.vals.push(auto.raw[calibrating.k] || 0);
+  exprBase.t = t;
   autoScores = auto.scores;
   const ax = settings.autoExpr && !activeExpr ? auto.top : null;
   const tuneName = activeExpr || ax?.[0], tw = activeExpr ? 1 : Math.min(1, (ax?.[1] || 0) * 2);

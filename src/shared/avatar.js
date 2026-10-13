@@ -139,7 +139,7 @@ export class AvatarStage {
     n.zoom = Math.max(0.3, Math.min(5, +n.zoom || 1));
     n.px = Math.max(-2, Math.min(2, +n.px || 0));
     n.py = Math.max(-2, Math.min(2, +n.py || 0));
-    n.yaw = Math.max(-Math.PI, Math.min(Math.PI, +n.yaw || 0));
+    n.yaw = ((((+n.yaw || 0) + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; // turns all the way round
     n.el = Math.max(-0.6, Math.min(0.6, +n.el || 0));
     n.roll = Math.max(-180, Math.min(180, +n.roll || 0)); // degrees, + = counter-clockwise on screen
     this.view = n;
@@ -320,14 +320,14 @@ export class AvatarStage {
       hb(name + 'LowerLeg')?.rotation.set(s * P[side + 'K'], 0, 0);
       hb(name + 'Foot')?.rotation.set(s * P[side + 'A'], 0, 0);
     }
-    if (chest) chest.rotation.set(s * breathe * 0.6, new THREE.Euler().setFromQuaternion(cur.q).y * 0.15, 0);
+    if (chest) chest.rotation.set(s * breathe * 0.6, new THREE.Euler().setFromQuaternion(cur.q).y * 0.15 + P.cy, 0);
     // relaxed idle arms (the arm tracker blends from this pose)
     const sway = Math.sin(t * 0.9) * 0.03;
     const set = (n, x, y, z) => { const b = hb(n); if (b) b.rotation.set(x, y, z); };
     set('leftUpperArm', -s * P.laF, 0, s * (-1.22 + sway));
     set('rightUpperArm', -s * P.raF, 0, s * (1.22 - sway));
-    set('leftLowerArm', 0, -0.25, 0); // rotation about Y is the same in both frames
-    set('rightLowerArm', 0, 0.25, 0);
+    set('leftLowerArm', 0, -0.25 - P.laE, 0); // rotation about Y is the same in both frames
+    set('rightLowerArm', 0, 0.25 + P.raE, 0);
     set('leftHand', 0, 0, -0.1 * s);
     set('rightHand', 0, 0, 0.1 * s);
     this._idleFingers(t);
@@ -672,11 +672,14 @@ export class AvatarStage {
  * Auto expressions: read the emotion off the face-shape weights (no extra model needed). Each one
  * combines several cues (one cue alone, like raised brows, is too common in normal talking), scaled by
  * the broadcaster's sensitivity (ag); only the strongest shows, so they don't blur together.
- * @param b  ARKit blendshape weights
- * @returns { scores: {happy, sad, angry, surprised}, top: [name, score] | null }
+ * @param b     ARKit blendshape weights
+ * @param base  optional resting level of each weight (ExprBaseline): only movement above it counts, so
+ *              a face that rests a bit smiley (or frowny) isn't read as happy (or angry) all the time
+ * @param cal   optional calibration { emotion: raw value of your own face doing it }: then that face = full
+ * @returns { scores: {happy, sad, angry, surprised}, top: [name, score] | null, raw }
  */
-export function autoExpression(b, ag = {}) {
-  const B = (n) => b[ARKIT_INDEX[n]] || 0;
+export function autoExpression(b, ag = {}, base = null, cal = null) {
+  const B = base ? (n) => Math.max(0, (b[ARKIT_INDEX[n]] || 0) - base[ARKIT_INDEX[n]]) : (n) => b[ARKIT_INDEX[n]] || 0;
   const avg = (a, c) => (B(a) + B(c)) / 2, pos = (v) => Math.max(0, v);
   const smile = avg('mouthSmileLeft', 'mouthSmileRight');
   const browInner = B('browInnerUp'), browOuter = avg('browOuterUpLeft', 'browOuterUpRight');
@@ -685,17 +688,47 @@ export function autoExpression(b, ag = {}) {
   const sneer = avg('noseSneerLeft', 'noseSneerRight'), press = avg('mouthPressLeft', 'mouthPressRight');
   const cheek = avg('cheekSquintLeft', 'cheekSquintRight');
   const notSmiling = 1 - clamp01(smile * 1.5);
+  // Webcam face tracking reads smiles strongly but frowns, lowered brows and sneers only faintly, so
+  // happy needs a clear smile while sad / angry react to smaller movements.
   const raw = {
-    happy: pos(smile - 0.22) * 1.8 + cheek * 0.3,
-    sad: (pos(frown - 0.03) * 3 + pos(browInner - browOuter - 0.05) * 1.8 + pos(B('mouthShrugLower') - 0.15) * 0.6) * notSmiling,
-    angry: (pos(browDown - 0.1) * 2.2 + sneer * 1.4 + pos(squint - 0.25) * 0.6 + press * 0.5) * notSmiling,
+    happy: pos(smile - 0.32) * 1.9 + pos(cheek - 0.1) * 0.25,
+    sad: (pos(frown - 0.02) * 4 + pos(browInner - browOuter * 0.6 - 0.04) * 2.4 + pos(B('mouthShrugLower') - 0.1) * 0.9 + pos(press - 0.1) * 0.4) * notSmiling,
+    angry: (pos(browDown - 0.05) * 3.2 + sneer * 2.2 + pos(squint - 0.15) * 0.9 + press * 0.6) * notSmiling,
     surprised: pos((browInner + browOuter) / 2 - 0.18) * 1.4 + pos(wide - 0.08) * 1.6 + pos(B('jawOpen') - 0.25) * 0.6,
   };
   const scores = {};
   let top = null;
-  for (const k in raw) { scores[k] = clamp01(raw[k] * (ag[k] ?? 1)); if (!top || scores[k] > scores[top]) top = k; }
-  return { scores, top: top && scores[top] > 0.12 ? [top, scores[top]] : null };
+  for (const k in raw) {
+    // calibrated: your own "full" face = 1, and it starts showing from about a quarter of it
+    const v = cal?.[k] > 0 ? Math.max(0, raw[k] / cal[k] - 0.15) / 0.85 : raw[k];
+    scores[k] = clamp01(v * (ag[k] ?? 1));
+    if (!top || scores[k] > scores[top]) top = k;
+  }
+  return { scores, top: top && scores[top] > 0.12 ? [top, scores[top]] : null, raw };
 }
+
+/**
+ * The resting level of each expression cue, learned on the fly (no calibration step): it follows the
+ * face down quickly and up only very slowly, so it settles on how your face looks when relaxed, while
+ * a smile or a frown held for a while still counts.
+ */
+export class ExprBaseline {
+  constructor() { this.v = new Float32Array(ARKIT.length).fill(-1); }
+  update(b, dt) {
+    const up = 1 - Math.exp(-dt / 120), down = 1 - Math.exp(-dt / 2.5);
+    for (const i of BASE_CUES) {
+      const x = b[i] || 0;
+      if (this.v[i] < 0) { this.v[i] = Math.min(x, 0.3); continue; }
+      this.v[i] += (x - this.v[i]) * (x > this.v[i] ? up : down);
+    }
+    return this.view();
+  }
+  /** Baseline per weight (0 where none is learned; jaw / eyes-closed etc. are never shifted). */
+  view() { const out = new Float32Array(ARKIT.length); for (const i of BASE_CUES) out[i] = Math.max(0, this.v[i]) * 0.9; return out; }
+}
+const BASE_CUES = ['mouthSmileLeft', 'mouthSmileRight', 'mouthFrownLeft', 'mouthFrownRight', 'browInnerUp', 'browOuterUpLeft', 'browOuterUpRight',
+  'browDownLeft', 'browDownRight', 'eyeWideLeft', 'eyeWideRight', 'eyeSquintLeft', 'eyeSquintRight', 'noseSneerLeft', 'noseSneerRight',
+  'mouthPressLeft', 'mouthPressRight', 'cheekSquintLeft', 'cheekSquintRight', 'mouthShrugLower'].map((n) => ARKIT_INDEX[n]);
 
 function newArmState() {
   return {

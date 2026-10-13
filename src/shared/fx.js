@@ -4,6 +4,9 @@
 //    rhythm under a big cartoon hand (the "headpat" meme). Only the model's head is squished (its bone
 //    is scaled), props are never squished.
 //  • Boop: click the nose. A little nose scrunch and a few tiny stars flying off.
+//  • Slap (only if the broadcaster allows it): a quick swipe of the mouse across the bottom (not a
+//    click, so the springs there can still be grabbed). The spring bones there (skirt, tail, long
+//    hair…) wiggle for a moment, whole chains at once, and the legs wobble a tiny bit, feet planted.
 //
 // The areas come from the model's head and eye bones; the broadcaster can nudge them (style.fx).
 // AvatarFx draws the effects; FxInput turns mouse movement into "pat" / "boop" events.
@@ -21,7 +24,7 @@ export class AvatarFx {
   constructor(stage) {
     this.stage = stage;
     this.pat = { level: 0, until: 0, phase: 0, rate: PAT_RATE, want: PAT_RATE };
-    this.boopAt = -1e9;
+    this.boopAt = -1e9; this.slapAt = -1e9;
     this.stars = [];
     this.group = new THREE.Group();
     this.group.renderOrder = 900;
@@ -69,6 +72,18 @@ export class AvatarFx {
       noseC: eyes.clone().add(new THREE.Vector3(0, -eyeUp * 0.62, eyeUp * 0.6)), // below and in front of the eyes
       noseR: eyeUp * 0.38,
     };
+    // the bottom: behind the hip joints, following the hips bone
+    this.hips = vrm.humanoid.getRawBoneNode('hips') || null;
+    const lL = vrm.humanoid.getRawBoneNode('leftUpperLeg'), rL = vrm.humanoid.getRawBoneNode('rightUpperLeg');
+    if (this.hips && lL && rL) {
+      const lp = lL.getWorldPosition(new THREE.Vector3()), rp = rL.getWorldPosition(new THREE.Vector3());
+      const w = Math.max(0.08, lp.distanceTo(rp)); // hip width
+      const mid = lp.add(rp).multiplyScalar(0.5);
+      this.rest.hipsQ = this.hips.getWorldQuaternion(new THREE.Quaternion());
+      this.rest.HP = this.hips.getWorldPosition(new THREE.Vector3());
+      this.rest.buttC = new THREE.Vector3(mid.x, mid.y - w * 0.4, mid.z - w * 0.45);
+      this.rest.buttR = w * 0.8;
+    }
     this.pat.level = 0;
   }
 
@@ -86,14 +101,24 @@ export class AvatarFx {
     };
     const patRest = r.patC.clone().add(new THREE.Vector3(0, fx.hy || 0, fx.hz || 0));
     const noseRest = r.noseC.clone().add(new THREE.Vector3(0, fx.ny || 0, fx.nz || 0));
-    return {
+    const out = {
       pat: { c: toWorld(patRest), r: r.patR * (fx.hs || 1) },
       nose: { c: toWorld(noseRest), r: r.noseR * (fx.ns || 1) },
     };
+    if (r.buttC && this.hips) {
+      // forward/back is negative = further back (the area sits behind the hips)
+      const rest = r.buttC.clone().add(new THREE.Vector3(0, fx.by || 0, -(fx.bz || 0)));
+      const local = rest.sub(r.HP).applyQuaternion(r.hipsQ.clone().invert());
+      const c = this.hips.localToWorld(local);
+      const center = this.hips.getWorldPosition(new THREE.Vector3());
+      out.butt = { c, r: r.buttR * (fx.bs || 1), back: c.clone().sub(center).setY(0).normalize() };
+    }
+    return out;
   }
 
-  /** 'nose' | 'head' | null for a canvas point (CSS px). */
-  hit(x, y, headScale = 1) {
+  /** 'nose' | 'head' | 'butt' | null for a canvas point (CSS px). The bottom only counts when withButt
+   *  and only while it's turned at least sideways to the camera (not through the front of the hips). */
+  hit(x, y, headScale = 1, withButt = false) {
     const a = this.areas();
     if (!a) return null;
     const cam = this.stage.camera, w = this.stage.canvas.clientWidth, h = this.stage.canvas.clientHeight;
@@ -107,6 +132,10 @@ export class AvatarFx {
     };
     let scale = 1;
     if (inside(a.nose)) return 'nose';
+    if (withButt && a.butt) {
+      const toCam = cam.position.clone().sub(a.butt.c).setY(0).normalize();
+      if (a.butt.back.dot(toCam) > -0.25 && inside(a.butt)) return 'butt';
+    }
     scale = headScale;
     if (inside(a.pat)) return 'head';
     return null;
@@ -131,6 +160,94 @@ export class AvatarFx {
       const ang = turn + (i / n) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
       const dir = right.clone().multiplyScalar(Math.cos(ang)).addScaledVector(up, Math.sin(ang));
       this._spawnStar(origin, dir, a, i);
+    }
+  }
+
+  /** A direction on screen (px, y down) as a unit direction in the avatar's own space, [x, y, z]. */
+  screenToAvatarDir(dx, dy) {
+    const cam = this.stage.camera;
+    const w = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion).multiplyScalar(dx)
+      .add(new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion).multiplyScalar(-dy));
+    if (w.lengthSq() < 1e-8 || !this.vrm) return null;
+    w.applyQuaternion(this.vrm.scene.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+    return w.toArray().map((v) => +v.toFixed(3));
+  }
+
+  /** @param dir optional [x, y, z] in avatar space: the way the slapping hand went (the wiggle follows it) */
+  slap(dir = null) {
+    this.slapAt = performance.now();
+    this.slapChains = [];
+    this.slapDir = Array.isArray(dir) && dir.length === 3 && dir.every(Number.isFinite) ? new THREE.Vector3(...dir) : null;
+    const a = this.areas();
+    if (!a?.butt) return;
+    // every spring chain (skirt panel, tail, lock of hair…) that starts or passes near the bottom
+    const st = this.stage, reach = a.butt.r * 1.6, p = new THREE.Vector3();
+    const pick = st.style?.sb;
+    if (pick && pick.id === st.modelId) { // the broadcaster picked the chains for this model
+      const roots = new Set(pick.roots);
+      this.slapChains = this._chains().filter((c) => roots.has(chainName(c)));
+      this.slapR = a.butt.r;
+      return;
+    }
+    for (const chain of this._chains()) {
+      // near the bottom, or hanging straight off the hips (tails, skirts)
+      const onHips = chain[0].bone.parent === this.hips || chain[0].bone.parent?.parent === this.hips;
+      const near = onHips || chain.some((j) => j.bone.getWorldPosition(p).distanceTo(a.butt.c) < reach || st._jointTailWorld(j, p).distanceTo(a.butt.c) < reach);
+      if (near) this.slapChains.push(chain);
+    }
+    this.slapR = a.butt.r;
+  }
+
+  /** The spring chains of the model: [{ name, joints }] (name = its root bone's name). */
+  chainList() { return this._chains().map((c) => ({ name: chainName(c), joints: c.length })); }
+
+  /** Spring joints grouped into chains (root first), worked out once per model. */
+  _chains() {
+    const st = this.stage;
+    if (this._chainsFor === st.springJoints) return this._chainList;
+    const byRoot = new Map();
+    for (const j of st.springJoints || []) {
+      const path = [j];
+      let p = st.jointByBone.get(j.bone.parent);
+      while (p && path.length < 64) { path.unshift(p); p = st.jointByBone.get(p.bone.parent); }
+      const root = path[0];
+      if (!byRoot.has(root) || byRoot.get(root).length < path.length) byRoot.set(root, path);
+    }
+    this._chainsFor = st.springJoints;
+    this._chainList = [...byRoot.values()];
+    return this._chainList;
+  }
+
+  /** While a slap is going: drive the hit chains side to side (forced, decaying), call before vrm.update(). */
+  _wiggleSprings(dt) {
+    const t = (performance.now() - this.slapAt) / 1000;
+    if (!this.slapChains?.length || !(dt > 0)) return;
+    if (t > 1.4) { this.slapChains = null; return; }
+    const hips = this.hips;
+    if (!hips) return;
+    const q = hips.getWorldQuaternion(new THREE.Quaternion());
+    let side = new THREE.Vector3(1, 0, 0).applyQuaternion(q), fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+    if (this.slapDir && this.vrm && this.slapDir.lengthSq() > 1e-6) {
+      // swung the way the hand went: knocked that way first, then swinging back and forth along it
+      side = this.slapDir.clone().applyQuaternion(this.vrm.scene.getWorldQuaternion(new THREE.Quaternion())).normalize();
+      fwd.set(0, 0, 0);
+    }
+    const r = this.slapR || 0.12;
+    // where the tails should be pushed to, now and a frame ago; the difference is moved this frame. The
+    // tails are moved directly (not given a speed), so it shows even on stiff, heavily damped springs.
+    const D = (tt) => side.clone().multiplyScalar(Math.sin(tt * Math.PI * 2 * 3.6) * Math.exp(-2.4 * tt))
+      .addScaledVector(fwd, 0.6 * (1 - Math.exp(-25 * tt)) * Math.exp(-5 * tt));
+    const step = D(t).sub(D(Math.max(0, t - dt)));
+    const tail = new THREE.Vector3(), moved = new THREE.Vector3();
+    for (const chain of this.slapChains) {
+      chain.forEach((j, i) => {
+        const k = Math.min(1.6, 0.45 + i * 0.3) * r; // the further down the chain, the bigger the swing
+        const m = j._getMatrixWorldToCenter();
+        this.stage._jointTailWorld(j, tail);
+        moved.copy(tail).addScaledVector(step, k).applyMatrix4(m);
+        const delta = moved.sub(j._currentTail);
+        j._currentTail.add(delta); j._prevTail.add(delta);
+      });
     }
   }
 
@@ -167,6 +284,20 @@ export class AvatarFx {
     if (bt < 0.45) { const k = Math.sin(bt / 0.45 * Math.PI) * Math.exp(-bt * 3); sy *= 1 - 0.1 * k; sxz *= 1 + 0.06 * k; }
     this.head.scale.set(sxz, sy, sxz);
     this.press = press;
+    // slap: the springs there wiggle, and the hips give a small jiggle (the upper body is held steady)
+    this._wiggleSprings(dt);
+    // …and the legs wobble a tiny bit, knees swaying while the feet stay planted: the thigh turns by w,
+    // the shin back by twice that (thigh ≈ shin length), the foot by w again to stay flat
+    const st = (now - this.slapAt) / 1000;
+    if (st < 0.8 && this.vrm) {
+      const hb = (n) => this.vrm.humanoid.getNormalizedBoneNode(n);
+      const w = 0.018 * Math.sin(st * 26) * Math.exp(-st * 5.5), Z = new THREE.Vector3(0, 0, 1);
+      for (const side of ['left', 'right']) {
+        hb(side + 'UpperLeg')?.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(Z, w));
+        hb(side + 'LowerLeg')?.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(Z, -2 * w));
+        hb(side + 'Foot')?.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(Z, w));
+      }
+    }
   }
 
   /** Hand, stars and area outlines, call every frame after the model is posed. */
@@ -223,12 +354,15 @@ export class AvatarFx {
         l.computeLineDistances(); l.renderOrder = 1002; l.layers.set(3); return l;
       };
       this.areaMarks = new THREE.Group();
-      this.areaMarks.add(ring(0xb48cff), ring(0xffcf70));
+      this.areaMarks.add(ring(0xb48cff), ring(0xffcf70), ring(0xff7aa8));
       this.group.add(this.areaMarks);
     }
     this.areaMarks.visible = true;
-    const [pat, nose] = this.areaMarks.children;
-    for (const [m, ar] of [[pat, a.pat], [nose, a.nose]]) { m.position.copy(ar.c); m.quaternion.copy(camera.quaternion); m.scale.setScalar(ar.r); }
+    const [pat, nose, butt] = this.areaMarks.children;
+    for (const [m, ar] of [[pat, a.pat], [nose, a.nose], [butt, a.butt]]) {
+      m.visible = !!ar;
+      if (ar) { m.position.copy(ar.c); m.quaternion.copy(camera.quaternion); m.scale.setScalar(ar.r); }
+    }
   }
 }
 
@@ -244,23 +378,43 @@ const START_AFTER_MS = 400, FORGIVE_MS = 600, OVERSHOOT = 1.8, FLIP_MIN_PX = 10;
 // a pat needs some speed: strokes slower than this (back-and-forths per second) don't start one, and a
 // pause this long between direction changes starts the count over (slowly moving across the head)
 const START_RATE = 4, MAX_FLIP_GAP_MS = 175;
+// a slap: the mouse crossing the bottom at least this fast (px/s) for at least this far (px)
+const SLAP_SPEED = 1400, SLAP_PX = 40;
 export class FxInput {
-  constructor(fx, canvas, { onPat = () => {}, onBoop = () => {}, enabled = () => true } = {}) {
-    this.fx = fx; this.canvas = canvas; this.onPat = onPat; this.onBoop = onBoop; this.enabled = enabled;
+  constructor(fx, canvas, { onPat = () => {}, onBoop = () => {}, onSlap = () => {}, enabled = () => true, canSlap = () => false } = {}) {
+    this.fx = fx; this.canvas = canvas; this.onPat = onPat; this.onBoop = onBoop; this.onSlap = onSlap; this.enabled = enabled; this.canSlap = canSlap;
     this._reset();
     this.lastPatSent = 0;
   }
   _reset() { this.last = null; this.dir = 0; this.travel = 0; this.flips = []; this.rubSince = 0; this.offSince = 0; this.patting = false; }
   _local(e) { const r = this.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
-  /** 'nose' | 'head' | null under the mouse. */
+  /** 'nose' | 'head' | null under the mouse (the bottom isn't clickable: it's swiped, see _swipe). */
   over(e) { return this.enabled() ? this.fx.hit(...this._local(e)) : null; }
 
   move(e) {
-    if (!this.enabled()) { if (this.last) this._reset(); return; }
     // the browser hands over one move event per frame; the in-between positions are in
     // getCoalescedEvents(), so use them all and quick rubbing is caught even at a low frame rate
     const list = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+    if (this.canSlap()) for (const ev of list) this._swipe(ev); else this.swipe = null;
+    if (!this.enabled()) { if (this.last) this._reset(); return; }
     for (const ev of list) this._move(ev);
+  }
+
+  /** A fast swipe across the bottom = slap (at least SLAP_PX travelled inside it at SLAP_SPEED or more). */
+  _swipe(e) {
+    const now = e.timeStamp || performance.now(), [x, y] = this._local(e);
+    if (this.fx.hit(x, y, 1, true) !== 'butt') { this.swipe = null; return; }
+    const s = this.swipe;
+    if (!s || now - s.t > 80) { this.swipe = { x, y, t: now, dist: 0, vx: 0, vy: 0 }; return; }
+    const d = Math.hypot(x - s.x, y - s.y), dt = Math.max(1, now - s.t);
+    if (d / dt * 1000 >= SLAP_SPEED) { s.dist += d; s.vx += x - s.x; s.vy += y - s.y; } // the fast part of the stroke…
+    else { s.dist = 0; s.vx = 0; s.vy = 0; } // too slow: start counting again
+    s.x = x; s.y = y; s.t = now;
+    if (s.dist >= SLAP_PX) {
+      this.swipe = null;
+      const dir = this.fx.screenToAvatarDir(s.vx, s.vy); // …is the way the hand went
+      this.fx.slap(dir); this.onSlap(dir);
+    }
   }
 
   _move(e) {
@@ -309,12 +463,14 @@ export class FxInput {
 
   /** Mouse down: boops if it's on the nose. Returns true if it booped. */
   down(e) {
-    if (!this.enabled() || this.over(e) !== 'nose') return false;
+    if (this.over(e) !== 'nose') return false;
     this.fx.boop();
     this.onBoop();
     return true;
   }
 }
+
+const chainName = (chain) => chain[0].bone.name || 'chain';
 
 // ---- drawn textures ----
 function handTexture() {

@@ -35,6 +35,9 @@ contextBridge.exposeInMainWorld('vt', {
   openOutput: (opts) => ipcRenderer.send('output-open', opts),
   closeOutput: () => ipcRenderer.send('output-close'),
   onOutputClosed: (cb) => ipcRenderer.on('output-closed', () => cb()),
+  openMirror: (opts) => ipcRenderer.send('mirror-open', opts),
+  closeMirror: () => ipcRenderer.send('mirror-close'),
+  onMirrorClosed: (cb) => ipcRenderer.on('mirror-closed', () => cb()),
   onLockChanged: (cb) => ipcRenderer.on('lock-changed', (_e, locked) => cb(locked)),
   // screen mode
   onZoneEdit: (cb) => ipcRenderer.on('zone-edit', (_e, on) => cb(on)),

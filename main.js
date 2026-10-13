@@ -275,7 +275,7 @@ function setSenderHotkeys(list) {
 ipcMain.handle('set-hotkeys', (_e, list) => setSenderHotkeys(list));
 
 // sender page already said bye to its viewers
-ipcMain.on('back-to-menu', () => { setSenderHotkeys([]); closeOutput(); showLauncher(); });
+ipcMain.on('back-to-menu', () => { setSenderHotkeys([]); closeOutput(); closeMirror(); showLauncher(); });
 
 // Camera output: a plain window with just the avatar on a solid background, for OBS window capture
 // (→ chroma key → OBS Virtual Camera, which Discord & co. see as a webcam).
@@ -292,6 +292,29 @@ ipcMain.on('output-open', (_e, opts = {}) => {
   me.on('closed', () => { if (outputWin === me) outputWin = null; try { mainWin?.webContents.send('output-closed'); } catch {} });
 });
 ipcMain.on('output-close', () => closeOutput());
+
+// Mirror: the broadcaster's own avatar, full screen on their monitor, placed exactly like on the
+// viewer they picked (a click-through full-screen overlay, fed by the broadcaster window).
+let mirrorWin = null, mirrorDisplayId = null;
+function closeMirror() { if (mirrorWin && !mirrorWin.isDestroyed()) { mirrorWin._managedClose = true; mirrorWin.destroy(); } mirrorWin = null; }
+ipcMain.on('mirror-open', (_e, opts = {}) => {
+  closeMirror();
+  const d = displayById(Number(opts.displayId));
+  mirrorDisplayId = d.id;
+  const win = mirrorWin = new BrowserWindow({
+    icon: ICON, webPreferences: webPrefs, ...d.bounds, transparent: true, frame: false, resizable: false, movable: false,
+    hasShadow: false, skipTaskbar: true, alwaysOnTop: true, focusable: false, backgroundColor: '#00000000', title: 'VTOverlay mirror',
+  });
+  win.removeMenu();
+  win.setBounds(d.bounds);
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true);
+  win.setIgnoreMouseEvents(true, { forward: true });
+  win.loadURL(pageUrl('overlay.html', { mode: 'screen', mirror: '1', interact: '0', code: '' }));
+  win.on('closed', () => { if (mirrorWin === win) mirrorWin = null; try { mainWin?.webContents.send('mirror-closed'); } catch {} });
+});
+ipcMain.on('mirror-close', () => closeMirror());
+const isMirror = (e) => !!mirrorWin && !mirrorWin.isDestroyed() && e.sender === mirrorWin.webContents;
 
 // the browser clipboard API is blocked by our permission rules; use Electron's
 ipcMain.on('copy-text', (_e, text) => clipboard.writeText(String(text ?? '')));
@@ -423,6 +446,7 @@ async function doAction(action, arg) {
 }
 ipcMain.on('rx-action', (_e, action, arg) => doAction(action, arg));
 ipcMain.on('rx-status', (_e, state, text) => {
+  if (isMirror(_e)) return;
   if (DEV && text !== rx.status?.text) console.log('viewer status:', text); // shows in the npm run dev terminal
   rx.status = { state, text }; pushState();
 });
@@ -464,7 +488,7 @@ function workAreaOf(displayId) {
   const d = displayById(displayId), b = d.bounds, w = d.workArea;
   return { x: (w.x - b.x) / b.width, y: (w.y - b.y) / b.height, w: w.width / b.width, h: w.height / b.height };
 }
-ipcMain.handle('get-work-area', () => workAreaOf(rx.displayId));
+ipcMain.handle('get-work-area', (e) => workAreaOf(isMirror(e) ? mirrorDisplayId : rx.displayId));
 ipcMain.on('rx-disconnect', () => disconnectReceiver());
 
 function setClickThrough(on) {
@@ -479,6 +503,7 @@ function setClickThrough(on) {
 // A click-through overlay (full screen, or a locked floating widget) briefly takes the mouse while the
 // cursor is over a part of the avatar that can be grabbed (hair, clothes…), and gives it back after.
 ipcMain.on('overlay-capture-mouse', (_e, on) => {
+  if (isMirror(_e)) return;
   if (!overlayWin || overlayWin.isDestroyed()) return;
   const clickThrough = (rx.mode === 'screen' && !rx.editingZone) || (rx.mode === 'floating' && rx.locked);
   if (clickThrough) overlayWin.setIgnoreMouseEvents(!on, { forward: true });
@@ -629,6 +654,7 @@ app.whenReady().then(() => {
   // taskbar moved / resized / auto-hide toggled, resolution changed…
   screen.on('display-metrics-changed', () => {
     if (rx.mode === 'screen' && overlayWin && !overlayWin.isDestroyed()) overlayWin.webContents.send('work-area', workAreaOf(rx.displayId));
+    if (mirrorWin && !mirrorWin.isDestroyed()) mirrorWin.webContents.send('work-area', workAreaOf(mirrorDisplayId));
   });
 });
 
