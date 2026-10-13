@@ -128,6 +128,14 @@ for (const k of ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'smoothing', 
 {
   let open = {};
   try { open = JSON.parse(localStorage.getItem('vt-sections') || '{}'); } catch {}
+  // after any panel opens / closes, make the sidebar re-measure how far it can scroll (some Windows
+  // setups kept the old, shorter range after closing everything and opening it again)
+  const aside = document.querySelector('aside');
+  aside.addEventListener('toggle', () => requestAnimationFrame(() => {
+    const top = aside.scrollTop;
+    aside.style.overflowY = 'hidden'; void aside.offsetHeight; aside.style.overflowY = '';
+    aside.scrollTop = top;
+  }), true);
   document.querySelectorAll('details.sec[data-sec]').forEach((d) => {
     if (open[d.dataset.sec] !== undefined) d.open = open[d.dataset.sec];
     d.addEventListener('toggle', () => { open[d.dataset.sec] = d.open; try { localStorage.setItem('vt-sections', JSON.stringify(open)); } catch {} });

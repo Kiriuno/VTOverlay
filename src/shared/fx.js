@@ -307,21 +307,28 @@ export class AvatarFx {
     const L = this.pat.level;
     this.hand.visible = L > 0.01 && !!a;
     if (this.hand.visible) {
-      const r = a.pat.r, up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      // the hand comes from above the avatar's head as seen on screen, even when the picture is rolled
+      // (sideways, upside down): "up" is the avatar's up, flattened onto the screen
+      const camQ = camera.quaternion;
+      const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camQ), camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camQ);
+      const ax = UP.dot(camRight), ay = UP.dot(camUp);
+      const roll = Math.hypot(ax, ay) > 0.2 ? Math.atan2(-ax, ay) : 0; // how far the avatar's up is turned on screen
+      const handQ = camQ.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), roll));
+      const r = a.pat.r, up = new THREE.Vector3(0, 1, 0).applyQuaternion(handQ);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(handQ);
       const toCam = camera.position.clone().sub(a.pat.c).normalize();
       if (this.gif) {
         // the gif animates the hand itself: show the frame for this point of the pat
         const g = this.gif, f = Math.min(g.frames.length - 1, Math.floor(this.pat.phase * g.frames.length));
         if (f !== g.shown) { g.ctx.clearRect(0, 0, g.canvas.width, g.canvas.height); g.ctx.drawImage(g.frames[f], 0, 0); g.tex.needsUpdate = true; g.shown = f; }
         this.hand.position.copy(a.pat.c).addScaledVector(up, r * (0.55 + 0.5 * (1 - L))).addScaledVector(toCam, r * 0.6);
-        this.hand.quaternion.copy(camera.quaternion);
+        this.hand.quaternion.copy(handQ);
         const s = r * 3.4;
         this.hand.scale.set(s, s, 1);
       } else {
         const lift = r * (1.0 - 0.45 * (this.press || 0)) + r * 0.6 * (1 - L);
         this.hand.position.copy(a.pat.c).addScaledVector(up, lift).addScaledVector(right, Math.sin(this.pat.phase * Math.PI * 2 * 0.5) * r * 0.12).addScaledVector(toCam, r * 0.6);
-        this.hand.quaternion.copy(camera.quaternion);
+        this.hand.quaternion.copy(handQ);
         this.hand.rotateZ(-0.15 + Math.sin(this.pat.phase * Math.PI * 2) * 0.05);
         const s = r * 2.4;
         this.hand.scale.set(s, s, 1);
