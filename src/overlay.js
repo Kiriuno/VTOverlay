@@ -4,6 +4,7 @@ import { AvatarStage } from './shared/avatar.js';
 import { SpringGrabber } from './shared/grab.js';
 import { FxInput } from './shared/fx.js';
 import { normalizeProp } from './shared/props.js';
+import { Room, rowLayout, rowPos } from './shared/room.js';
 import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, IDLE_HIDE_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,14 +17,29 @@ const MIRROR = params.get('mirror') === '1';
 if (MIRROR) document.body.classList.add('mirror');
 document.body.classList.add(MODE);
 
+let room = null; // co-hosts' avatars (multi-model rooms), set up further down
 const store = { // the mirror keeps its own copies, so it never changes what a real viewer remembers
   get(k, d) { try { const v = localStorage.getItem((MIRROR ? 'mirror:' : '') + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem((MIRROR ? 'mirror:' : '') + k, JSON.stringify(v)); } catch {} },
 };
 
 // See-through windows (floating / full screen) are composited by the CPU on Windows, so keep their
-// pixel count and frame rate modest; the normal window can afford more.
-const stage = new AvatarStage($('stage'), MODE === 'window' ? { maxPixelRatio: 2 } : { maxPixelRatio: MODE === 'screen' ? 1 : 1.5, maxFps: 45 });
+// pixel count modest; the normal window can afford more. Frame rate picked in the control window (30 / 45 / 60, default 45). Low resource mode overrides it:
+// 20 fps, lower resolution and smaller textures (graphics memory).
+let fps = [30, 45, 60].includes(Number(params.get('fps'))) ? Number(params.get('fps')) : 45;
+const quality = () => ({ maxPixelRatio: MODE === 'window' ? 2 : MODE === 'screen' ? 1 : 1.5, maxFps: fps, maxTexture: 0 });
+const LOW_QUALITY = { maxPixelRatio: 1, maxFps: 20, maxTexture: 1024 };
+let lowPower = params.get('low') === '1';
+const stage = new AvatarStage($('stage'), lowPower ? LOW_QUALITY : quality());
+window.vt.onFps?.((f) => { fps = f; if (!lowPower) { stage.setQuality(quality()); room?.setQuality(quality()); } });
+window.vt.onLowPower?.(async (on) => {
+  lowPower = on;
+  stage.setQuality(on ? LOW_QUALITY : quality());
+  room?.setQuality(on ? LOW_QUALITY : quality());
+  // texture size only applies when the avatar loads: reload it from the local copy
+  const rec = hasModel ? await cacheGet() : null;
+  if (rec?.id && rec.id === stage.modelId && rec.buf) await showModel(rec.buf, rec.id);
+});
 if (MODE === 'screen') $('anchor').appendChild($('status'));
 stage.setView(store.get('vt-view', {})); // last view from the broadcaster until a fresh one arrives
 stage.setStyle(store.get('vt-style', {})); // same for lighting / mouth shapes
@@ -75,7 +91,9 @@ function renderScreenProps(list) {
   }
 }
 let lastPropList = [];
-addEventListener('resize', () => renderScreenProps(lastPropList));
+// the host's screen images plus every co-host's (their ids prefixed, so they never clash)
+const allScreenProps = () => [...lastPropList, ...(room ? [...room.slots.values()].flatMap((s) => s.props.map((d) => ({ ...d, id: s.id + ':' + d.id }))) : [])];
+addEventListener('resize', () => renderScreenProps(allScreenProps()));
 
 // ---------------- tell the broadcaster what we see ----------------
 let rxState = { s: 'waiting', p: 0 }, rxSentAt = 0;
@@ -143,7 +161,7 @@ if (MODE === 'floating') {
   let drag = null;
   window.addEventListener('mousedown', (e) => {
     if (locked || e.button !== 0 || e.target.closest('button')) return;
-    if (grabber.grabbing || grabber.over(e) >= 0 || fxIn.over(e) === 'nose') return; // pulling hair / booping, not moving the widget
+    if (grabbing() || overAny(e)) return; // pulling hair / booping, not moving the widget
     drag = { x: e.screenX, y: e.screenY };
     document.body.classList.add('dragging');
   });
@@ -167,10 +185,10 @@ let grabAllowed = false, patAllowed = false, slapAllowed = false;
 let localInteract = params.get('interact') !== '0';
 const canInteract = () => localInteract && hasModel && !idleHidden && !document.body.classList.contains('zoning');
 const grabber = new SpringGrabber(stage, $('stage'), {
-  send: (j, p) => { try { if (model?.open) model.send({ t: 'grab', j, p }); } catch {} },
+  send: (j, p) => { if (mirrorCh) { mirrorCh.postMessage({ t: 'grab', j, p }); return; } try { if (model?.open) model.send({ t: 'grab', j, p }); } catch {} },
   canGrab: () => grabAllowed && canInteract(),
 });
-const sendFx = (k, r, d) => { try { if (model?.open) model.send({ t: 'fx', k, r, d }); } catch {} };
+const sendFx = (k, r, d) => { if (mirrorCh) { mirrorCh.postMessage({ t: 'fx', k, r, d }); return; } try { if (model?.open) model.send({ t: 'fx', k, r, d }); } catch {} };
 let lastBoop = 0, lastSlap = 0;
 const fxIn = new FxInput(stage.fx, $('stage'), {
   onPat: (r) => sendFx('pat', r),
@@ -189,25 +207,36 @@ function setCapture(on) {
   capturing = on;
   window.vt.captureMouse(on);
 }
+// every avatar on this page that can be touched: the host's, then the co-hosts' (multi-model rooms)
+const targets = () => [{ grabber, fxIn }, ...(room ? room.targets() : [])];
+const grabbing = () => targets().find((t) => t.grabber.grabbing) || null;
+function overAny(e) {
+  for (const t of targets()) {
+    if (t.fxIn.over(e) === 'nose') return 'nose';
+    if (t.grabber.over(e) >= 0) return 'grab';
+  }
+  return null;
+}
 function updateHover(e) {
-  const nose = !grabber.grabbing && fxIn.over(e) === 'nose';
-  const over = grabber.grabbing || nose || grabber.over(e) >= 0;
-  document.body.style.cursor = grabber.grabbing ? 'grabbing' : nose ? 'pointer' : over ? 'grab' : '';
-  if (clickThrough()) setCapture(over);
+  const g = grabbing(), o = g ? 'grab' : overAny(e);
+  document.body.style.cursor = g ? 'grabbing' : o === 'nose' ? 'pointer' : o ? 'grab' : '';
+  if (clickThrough()) setCapture(!!o);
 }
 addEventListener('pointermove', (e) => {
-  if (grabber.grabbing) grabber.move(e);
-  else if (!e.buttons) fxIn.move(e); // rubbing over the head = headpat (works even while click-through)
+  const g = grabbing();
+  if (g) g.grabber.move(e);
+  else if (!e.buttons) for (const t of targets()) t.fxIn.move(e); // rubbing over the head = headpat (works even while click-through)
   updateHover(e);
 });
 addEventListener('mousedown', (e) => {
   if (e.button !== 0 || e.target.closest('button, #zoneEditor')) return;
-  if (fxIn.down(e)) { e.preventDefault(); return; } // boop!
-  if (grabber.begin(e)) { e.preventDefault(); updateHover(e); }
+  const ts = targets().reverse(); // co-hosts are drawn over the host: they get first go
+  for (const t of ts) if (t.fxIn.down(e)) { e.preventDefault(); return; } // boop!
+  for (const t of ts) if (t.grabber.begin(e)) { e.preventDefault(); updateHover(e); return; }
 });
-addEventListener('mouseup', (e) => { if (grabber.grabbing) { grabber.end(); updateHover(e); } });
-addEventListener('blur', () => { if (grabber.grabbing) grabber.end(); });
-document.addEventListener('mouseleave', () => { if (!grabber.grabbing) { document.body.style.cursor = ''; if (clickThrough()) setCapture(false); } });
+addEventListener('mouseup', (e) => { const g = grabbing(); if (g) { g.grabber.end(); updateHover(e); } });
+addEventListener('blur', () => grabbing()?.grabber.end());
+document.addEventListener('mouseleave', () => { if (!grabbing()) { document.body.style.cursor = ''; if (clickThrough()) setCapture(false); } });
 function setGrabAllowed(on) {
   grabAllowed = on;
   if (!on || !localInteract) { grabber.end(); document.body.style.cursor = ''; if (clickThrough()) setCapture(false); }
@@ -246,7 +275,24 @@ const MARGIN = { side: 0.9, top: 0.6, bottom: 1.6 }; // × box height
 const STEP = 64;
 function layoutBox() {
   const zp = zonePx();
-  const p = clampPos(shown, zp);
+  const anchor = placeBox($('box'), stage, room ? rowPos(room.order, 'h', shown, zp.w / zp.h, stage.view.roll) : shown, zp);
+  Object.assign($('anchor').style, anchor);
+  layoutMembers();
+}
+
+/** Full screen, co-hosts: beside the host in the row, or (when the host allows) wherever they put themselves. */
+function layoutMembers() {
+  if (MODE !== 'screen' || !room) return;
+  const zp = zonePx();
+  for (const [id, s] of room.slots) {
+    const p = room.free && s.pos ? s.shown || (s.shown = { ...s.pos }) : rowPos(room.order, id, shown, zp.w / zp.h, stage.view.roll);
+    placeBox(s.el, s.stage, p, zp);
+  }
+}
+
+/** Put an avatar's drawing area (element `el` holding its canvas) at placement p in zone zp; returns the box's CSS. */
+function placeBox(el, st, pIn, zp) {
+  const p = clampPos(pIn, zp);
   const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
   const left = zp.x + p.x * zp.w - boxW / 2, top = zp.y + p.y * zp.h - boxH;
   const mS = boxH * MARGIN.side, mT = boxH * MARGIN.top, mB = boxH * MARGIN.bottom;
@@ -258,12 +304,12 @@ function layoutBox() {
   const w = Math.min(W, Math.max(STEP, Math.ceil((x1 - x0) / STEP) * STEP));
   const h = Math.min(H, Math.max(STEP, Math.ceil((y1 - y0) / STEP) * STEP));
   const rx = Math.max(0, Math.min(x0, W - w)), ry = Math.max(0, Math.min(y0, H - h));
-  const bs = $('box').style;
+  const bs = el.style;
   const resized = bs.width !== w + 'px' || bs.height !== h + 'px';
   Object.assign(bs, { left: rx + 'px', top: ry + 'px', width: w + 'px', height: h + 'px' });
-  Object.assign($('anchor').style, { left: left + 'px', top: top + 'px', width: boxW + 'px', height: boxH + 'px' });
-  stage.setViewport({ x: left - rx, y: top - ry, w: boxW, h: boxH });
-  if (resized) stage.syncSize(); // resize + redraw now, not on the next frame
+  st.setViewport({ x: left - rx, y: top - ry, w: boxW, h: boxH });
+  if (resized) st.syncSize(); // resize + redraw now, not on the next frame
+  return { left: left + 'px', top: top + 'px', width: boxW + 'px', height: boxH + 'px' };
 }
 
 function animatePlacement() {
@@ -273,8 +319,30 @@ function animatePlacement() {
     const d = pos[k] - shown[k];
     if (Math.abs(d) > 1e-4) { shown[k] += d * 0.35; moved = true; } else shown[k] = pos[k];
   }
-  if (moved) layoutBox();
+  // co-hosts placed on their own glide the same way
+  let membersMoved = false;
+  if (room) for (const s of room.slots.values()) {
+    if (!s.pos) continue;
+    if (!s.shown) { s.shown = { ...s.pos }; membersMoved = true; continue; }
+    for (const k of ['x', 'y', 's']) {
+      const d = s.pos[k] - s.shown[k];
+      if (Math.abs(d) > 1e-4) { s.shown[k] += d * 0.35; membersMoved = true; } else s.shown[k] = s.pos[k];
+    }
+    s.shown.tb = s.pos.tb;
+  }
+  if (moved) layoutBox(); else if (membersMoved) layoutMembers();
 }
+// co-hosts' avatars fade out on their own after a while without tracking (full screen, your mirror too)
+if (MODE === 'screen') setInterval(() => {
+  if (room) for (const s of room.slots.values()) {
+    const idle = s.hasModel && performance.now() - s.lastLive > IDLE_HIDE_MS;
+    if (idle === s.idle) continue;
+    s.idle = idle;
+    s.el.classList.toggle('idle', idle);
+    s.stage.suspended = false;
+    if (idle) setTimeout(() => { if (s.idle) s.stage.suspended = true; }, 900);
+  }
+}, 1000);
 
 function applyPos(p) {
   const next = { ...pos, ...p };
@@ -364,7 +432,7 @@ const idbProp = (mode, fn) => idb().then((db) => new Promise((res) => {
 })).catch(() => null);
 const propWaiters = new Map(); // hash -> [resolve]
 const incomingProps = new Map(); // hash -> { mime, size, chunks, parts, got }
-stage.props.setLoader(async (hash) => {
+const propLoader = async (hash) => {
   const cached = await idbProp('readonly', (st) => st.get('prop:' + hash));
   if (cached) return cached;
   return new Promise((resolve) => {
@@ -374,7 +442,8 @@ stage.props.setLoader(async (hash) => {
     if (list.length === 1) requestProp(hash);
     setTimeout(() => resolve(null), 120000);
   });
-});
+};
+stage.props.setLoader(propLoader);
 let mirrorCh = null;
 function requestProp(hash) {
   if (mirrorCh) { mirrorCh.postMessage({ t: 'need-prop', hash }); return; }
@@ -395,6 +464,49 @@ async function showModel(buf, id) {
     return false;
   }
 }
+
+// ---------------- co-hosts (multi-model rooms) ----------------
+// Their avatars come wrapped as { t:'mm', m, d } and stand in a row with the host's (see shared/room.js).
+const memberCache = {
+  get: (id) => idbProp('readonly', (st) => st.get('model:' + id)),
+  put: async (id, buf) => {
+    await idbProp('readwrite', (st) => st.put(buf, 'model:' + id));
+    // keep only the last few co-host models on disk
+    let ids = [];
+    try { ids = JSON.parse(localStorage.getItem('vt-member-models') || '[]'); } catch {}
+    ids = [id, ...ids.filter((x) => x !== id)];
+    for (const old of ids.slice(6)) idbProp('readwrite', (st) => st.delete('model:' + old));
+    try { localStorage.setItem('vt-member-models', JSON.stringify(ids.slice(0, 6))); } catch {}
+  },
+};
+const toHost = (msg) => { if (mirrorCh) { mirrorCh.postMessage(msg); return; } try { if (model?.open) model.send(msg); } catch {} };
+room = window.vtRoom = new Room({
+  main: stage,
+  container: $('members'),
+  stageOptions: () => (lowPower ? LOW_QUALITY : quality()),
+  propLoader, cache: memberCache, send: toHost, interactive: true, skip: ['h'], // 'h' (the host) is the main stage
+  // the host's avatar being hidden (not tracking) doesn't stop you touching a co-host's
+  canInteract: (s) => localInteract && s.hasModel && !s.idle && !document.body.classList.contains('zoning'),
+});
+room.startDepth({ main: $('box'), base: 2 }); // bigger avatars further back
+room.onProps = () => renderScreenProps(allScreenProps());
+room.onPos = () => {}; // free placement: picked up by the placement animation
+room.onChange = () => {
+  window.vt.setMemberCount?.(room.order.length || 1); // the floating widget widens for more avatars
+  layoutAll();
+  renderScreenProps(allScreenProps());
+};
+
+/** Floating / window: everyone in one row, centred, each the size a solo avatar would be (if it fits). */
+function layoutRow() {
+  if (MODE === 'screen') return;
+  if (room.order.length <= 1) { stage.setViewport(null); return; }
+  const L = rowLayout(room.order, innerWidth, innerHeight, 'group', stage.view.roll);
+  if (L.h) stage.setViewport(L.h);
+  for (const [id, s] of room.slots) if (L[id]) s.stage.setViewport(L[id]);
+}
+function layoutAll() { if (MODE === 'screen') layoutBox(); else layoutRow(); }
+addEventListener('resize', layoutRow);
 
 // ---------------- networking ----------------
 // One Peer (signalling registration) is kept for the whole session; only the two data channels are
@@ -514,6 +626,7 @@ function openChannels() {
   mo.on('data', (d) => {
     if (!live() || !d || d.t !== 'm') return;
     lastHeard = performance.now();
+    if (typeof d.m === 'string') { room.motion(d.m, d); return; } // a co-host's movements
     if (typeof d.n === 'number') {
       if (d.n <= lastSeq && lastSeq - d.n < 1000) return; // late / out-of-order frame: a newer one is already shown
       lastSeq = d.n;
@@ -589,7 +702,7 @@ function sendViewerState() {
   model.send({
     t: 'viewer', name: viewerName, mode: MODE,
     aspect: +(innerWidth / innerHeight).toFixed(4),
-    zone, work, pos, sharing, have: stage.modelId || cachedId,
+    zone, work, pos, sharing, have: stage.modelId || cachedId, rooms: 1, // rooms: understands multi-avatar rooms
   });
 }
 
@@ -608,6 +721,7 @@ async function onModelData(d) {
       closeChannels();
       stage.clearVRM(); hasModel = false;
       stage.props.sync([]);
+      room.setMembers({ order: [] });
       rxState = { s: 'waiting', p: 0 };
       if (d.reason === 'kicked') { stopped = true; teardown(); status('bad', 'The broadcaster disconnected you.', { retry: true }); }
       else if (d.reason === 'full') {
@@ -615,15 +729,29 @@ async function onModelData(d) {
         status('warn', `This room is full (${Number(d.max) || '?'} viewers max). You'll join as soon as a spot frees up…`);
         scheduleRetry(10000);
       }
+      else if (d.reason === 'obs-only') {
+        roomFullUntil = performance.now() + 15000;
+        status('warn', 'The broadcaster is in OBS only mode (no viewers). Retrying now and then…');
+        scheduleRetry(15000);
+      }
       else { status('warn', 'Broadcast ended, waiting for it to start again…'); failures = 0; scheduleRetry(4000); }
       return;
     case 'view': {
       const v = stage.setView(d);
       store.set('vt-view', v);
+      room.setView(v);
+      if (room.order.length > 1) layoutAll(); // a roll turns the whole row
       return;
     }
     case 'style':
       store.set('vt-style', stage.setStyle(d));
+      room.setHostLight(stage.style.light);
+      return;
+    case 'members': // who's in the room, left to right (multi-model rooms)
+      room.setMembers(d);
+      return;
+    case 'mm': // one of the co-hosts' messages
+      if (typeof d.m === 'string') await room.handle(d.m, d.d);
       return;
     case 'perm':
       patAllowed = !!d.pat;
@@ -639,7 +767,7 @@ async function onModelData(d) {
       if (typeof d.k === 'string' && d.k !== 'me') stage.setGrab(d.k, Number.isInteger(d.j) ? d.j : -1, Array.isArray(d.p) ? d.p.slice(0, 3).map(Number) : null, true);
       return;
     case 'props':
-      if (Array.isArray(d.list)) { lastPropList = d.list.slice(0, 64); stage.props.sync(lastPropList); renderScreenProps(lastPropList); }
+      if (Array.isArray(d.list)) { lastPropList = d.list.slice(0, 64); stage.props.sync(lastPropList); renderScreenProps(allScreenProps()); }
       return;
     case 'prop-begin':
       incomingProps.set(d.hash, { mime: String(d.mime || ''), size: d.size, chunks: d.chunks, parts: new Array(d.chunks), got: 0 });
@@ -747,7 +875,9 @@ function startMirror() {
   mirrorCh.onmessage = async ({ data: d }) => {
     if (!d || typeof d !== 'object') return;
     switch (d.t) {
-      case 'm': stage.setMotion(d); if (d.f && !d.h) markLive(); return;
+      case 'm':
+        if (typeof d.m === 'string') { room.motion(d.m, d); return; }
+        stage.setMotion(d); if (d.f && !d.h) markLive(); return;
       case 'model': if (stage.modelId !== d.id && d.buf) await showModel(d.buf, d.id); return;
       case 'prop-img':
         for (const resolve of propWaiters.get(d.hash) || []) resolve(d.blob);

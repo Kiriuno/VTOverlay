@@ -12,6 +12,7 @@ import { buildArmPayload, ArmTracker } from './shared/arms.js';
 import { OneEuroArray } from './shared/filters.js';
 import { PROP_ATTACH, DRAW_MODES, normalizeProp } from './shared/props.js';
 import { SpringGrabber } from './shared/grab.js';
+import { Room, rowLayout, rowPos, ownView, roomView, SLOT_STEP, MAX_MODELS } from './shared/room.js';
 
 const $ = (id) => document.getElementById(id);
 const MODEL_URLS = {
@@ -20,11 +21,31 @@ const MODEL_URLS = {
   hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
 };
 const SEND_INTERVAL_MS = 33; // ~30 Hz
+// Co-host mode (multi-model rooms): this page joins someone else's room with its own avatar instead of
+// hosting one. Started from the start screen's "Join with my avatar".
+const PAGE = new URLSearchParams(location.search);
+const GUEST_CODE = (PAGE.get('join') || '').toUpperCase();
+const GUEST = !!GUEST_CODE;
+const GUEST_NAME = (PAGE.get('name') || '').slice(0, 24);
+// Hosting a room with co-hosts (start screen: "With co-hosts"). A normal broadcast takes no co-hosts.
+// "OBS only": only the camera output, nothing goes to viewers; co-hosts can still join (then a code is needed).
+const OBS_ONLY = !GUEST && PAGE.has('obs');
+const ROOM_MODE = !GUEST && (PAGE.has('room') || OBS_ONLY);
+const ROOM_START = Number(PAGE.get('room') || PAGE.get('obs')) || 0; // dev: how many avatars to start with
+if (GUEST) document.body.classList.add('guest');
+let room = null;  // the other avatars in the room, drawn beside yours in the preview (set up below)
+let myId = GUEST ? null : 'h'; // which avatar is yours in the room ('h' = the host)
+// room state (declared early: settings applied at start-up already broadcast through it)
+const members = new Map(); // co-hosts by peer id: { id:'c1'…, name, model, motion, modelId, modelBuf, style, props, perm, lastHeard, incoming }
+let memberSeq = 0;
+let order = ['h'];
+let host = null; // a co-host's connection to the host: { peer, model, motion, lastHeard }
+let guestRetry = null, guestStopped = false, guestViewers = [];
 
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, viewerSlap: false, voiceMouth: false, voiceGain: 1, micId: '', exprCal: {}, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, viewerSlap: false, voiceMouth: false, voiceGain: 1, micId: '', roomModels: 1, freePlace: false, exprCal: {}, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -59,7 +80,7 @@ function loadModelProfile(id, name) {
     showLimits();
     showExprTune();
   }
-  $('sensFor').textContent = `Saved for “${name}”${prof ? '' : ' (new: started from your current settings)'}. Each avatar remembers its own.`;
+  $('sensFor').textContent = `Saved for “${name}”${prof ? '' : ' (copied from your current settings)'}.`;
   saveSettings();
 }
 const applyToggles = () => {
@@ -143,14 +164,22 @@ for (const k of ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'smoothing', 
 }
 
 // ---------------- avatar preview + view controls (viewers see the same framing) ----------------
-const stage = new AvatarStage($('stage'));
+const stage = new AvatarStage($('stage'), { maxFps: 60 }); // no need to draw the preview at 144 Hz on fast monitors
 let view = stage.setView(loadJSON('vt-view', DEFAULT_VIEW));
 window.vtStage = stage; // handy from the dev tools (and for tests)
 function loadJSON(k, d) { try { return { ...d, ...JSON.parse(localStorage.getItem(k) || '{}') }; } catch { return { ...d }; } }
 
 let viewSendTimer = null;
-function updateView(patch) {
+// In a room, framing (bust / full body) and roll are the host's; zoom, move and turn only move your own avatar.
+let hostView = null; // co-host: the host's whole view (its framing + roll, and how its own avatar is shown)
+function updateView(patch, fromHost = false) {
+  if (GUEST) {
+    if (fromHost) { hostView = { ...patch }; patch = roomView(patch); }
+    else { patch = { ...patch }; delete patch.fr; delete patch.roll; }
+  }
   view = stage.setView({ ...view, ...patch });
+  if (room) { room.setView(GUEST ? hostView || view : view); layoutNeighbors(); }
+  if (fromHost) { $('frBtn').textContent = 'Framing: ' + (view.fr === 'full' ? 'Full body' : 'Bust'); return; }
   $('frBtn').textContent = 'Framing: ' + (view.fr === 'full' ? 'Full body' : 'Bust');
   try { localStorage.setItem('vt-view', JSON.stringify(view)); } catch {}
   if (!viewSendTimer) viewSendTimer = setTimeout(() => { viewSendTimer = null; broadcastControl({ t: 'view', ...view }); }, 50);
@@ -164,9 +193,12 @@ showRoll();
 
 // ---------------- look: lighting + per-vowel mouth sensitivity (viewers get the same) ----------------
 let style = stage.setStyle(settings.style);
+let hostLight = null; // co-host: the host's lighting
 let styleSendTimer = null;
 function updateStyle(patch) {
   style = stage.setStyle({ vg: { ...style.vg, ...patch.vg }, vm: { ...style.vm, ...patch.vm }, ag: { ...style.ag, ...patch.ag }, light: { ...style.light, ...patch.light }, fx: { ...style.fx, ...patch.fx }, pose: patch.pose ?? style.pose, sb: 'sb' in patch ? patch.sb : style.sb });
+  if (GUEST && hostLight) stage.setStyle({ ...style, light: hostLight }); // the room's lighting is the host's
+  if (!GUEST && room) room.setHostLight(style.light); // …so the co-hosts beside you get yours
   settings.style = style; saveSettings();
   if (!styleSendTimer) styleSendTimer = setTimeout(() => { styleSendTimer = null; broadcastControl({ t: 'style', ...style }); }, 80);
   showStyle();
@@ -282,6 +314,27 @@ $('micSel').onchange = () => { settings.micId = $('micSel').value; saveSettings(
 // the meter keeps moving even while no face is tracked, so you can set it up
 setInterval(() => { if (voice.an && performance.now() - voice.at > 120) readVoice(); }, 100);
 if (settings.voiceMouth) startVoice();
+
+// ---- Performance panel ----
+const perfStart = new Map(); // part → memory the first time it was seen
+async function showPerf() {
+  if (!document.querySelector('[data-sec=perf]').open || !window.vt.appMetrics) return;
+  const list = await window.vt.appMetrics().catch(() => null);
+  if (!list) return;
+  const by = new Map();
+  for (const p of list) { const o = by.get(p.name) || { mb: 0, cpu: 0 }; o.mb += p.mb; o.cpu += p.cpu; by.set(p.name, o); }
+  const now = performance.now();
+  const rows = [...by].sort((a, b) => b[1].mb - a[1].mb).map(([name, o]) => {
+    if (!perfStart.has(name)) perfStart.set(name, { mb: o.mb, at: now });
+    const s = perfStart.get(name), grew = o.mb - s.mb, mins = (now - s.at) / 60000;
+    const trend = mins >= 1 && Math.abs(grew) >= 20 ? ` <span style="color:${grew > 0 ? 'var(--warn)' : 'inherit'}">${grew > 0 ? '+' : ''}${grew} MB in ${Math.round(mins)} min</span>` : '';
+    return `<div class="row" style="justify-content:space-between;gap:8px"><span>${name}</span><span>${o.mb} MB · ${o.cpu.toFixed(1)}% CPU${trend}</span></div>`;
+  });
+  const total = [...by.values()].reduce((a, o) => a + o.mb, 0);
+  $('perfRows').innerHTML = rows.join('') + `<div class="row" style="justify-content:space-between;margin-top:4px"><b>Total</b><b>${total} MB</b></div>`;
+}
+setInterval(showPerf, 4000);
+document.querySelector('[data-sec=perf]').addEventListener('toggle', showPerf);
 
 let autoScores = null; // what the auto expressions read from your face (set per tracked frame)
 const exprBase = new ExprBaseline(); // your relaxed face, learned as you go
@@ -431,7 +484,9 @@ async function useModel(buf, name) {
     buildExpressionButtons(info.expressions);
     storeLastModel(buf, name);
     for (const v of viewers.values()) if (v.model?.open) offerModel(v);
-    toOutput({ t: 'model', id, buf: buf.slice(0) });
+    for (const m of members.values()) sendToMember(m, { t: 'model-use', id });
+    ownToOutput({ t: 'model', id, buf: buf.slice(0) });
+    uploadModel();
     renderPlacement();
   } catch (err) {
     alert('Could not load this model:\n' + err.message);
@@ -701,9 +756,14 @@ function startPeer(code = savedCode() || randomCode()) {
     try { localStorage.setItem('vt-code', code); } catch {}
     showCode(code);
     updateViewers();
-    if (!viewers.size) setNet('ok', 'Online, waiting for viewers');
+    if (!viewers.size) setNet('ok', OBS_ONLY ? obsNetText() : 'Online, waiting for viewers');
   });
   p.on('connection', (conn) => {
+    if (conn.metadata?.role === 'member') { acceptMember(conn); return; } // someone joining with their own avatar
+    if (OBS_ONLY) { // no viewers in this mode
+      conn.on('open', () => { if (conn.label === 'model') { try { conn.send({ t: 'bye', reason: 'obs-only' }); } catch {} } setTimeout(() => conn.close(), 500); });
+      return;
+    }
     const id = conn.peer;
     // optional viewer limit: newcomers beyond it are told the room is full (they retry by themselves)
     if (!viewers.has(id) && settings.maxViewers > 0 && viewers.size >= settings.maxViewers) {
@@ -785,7 +845,8 @@ function startPeer(code = savedCode() || randomCode()) {
     if (p.destroyed || p.disconnected) retrySignalling();
   });
 }
-startPeer(DEV_CODE || undefined); // dev: the code `npm run dev` gave both windows
+if (GUEST) showCode(GUEST_CODE);
+else if (!OBS_ONLY) startPeer(DEV_CODE || undefined); // dev: the code `npm run dev` gave both windows (OBS only: see syncObsPeer)
 if (IS_DEV) document.body.classList.add('dev');
 
 function dropViewer(id) {
@@ -808,8 +869,10 @@ setInterval(() => {
 
 /** Send a viewer's grab to everyone else. */
 function relayGrab(fromId, msg) {
-  toOutput(msg);
+  if (fromId === 'mirror') { if (outputOpen) { try { outCh.postMessage(msg); } catch {} } } // the mirror did it itself
+  else toOutput(msg);
   for (const [id, v] of viewers) if (id !== fromId && v.model?.open) { try { v.model.send(msg); } catch {} }
+  for (const m of members.values()) sendToMember(m, msg); // co-hosts see it on the host's avatar too
 }
 function setViewerGrab(on) {
   broadcastControl(permMsg());
@@ -832,16 +895,56 @@ const toOutput = (msg) => {
 };
 const localPageHandler = (ch, onHello) => async ({ data: d }) => {
   if (d?.t === 'hello') {
-    if (modelBuf) ch.postMessage({ t: 'model', id: modelId, buf: modelBuf.slice(0) });
-    ch.postMessage({ t: 'view', ...view });
-    ch.postMessage({ t: 'style', ...style });
-    ch.postMessage({ t: 'props', list: publicProps() });
+    postLocalState(ch);
     onHello();
   }
-  if (d?.t === 'need-prop') { const blob = await getPropImage(String(d.hash)); if (blob) ch.postMessage({ t: 'prop-img', hash: d.hash, blob }); }
+  if (d?.t === 'need-model' && typeof d.m === 'string') { postMemberState(ch, d.m); return; } // a page that missed someone's avatar
+  if (d?.t === 'need-prop') { const blob = await getAnyPropImage(String(d.hash)); if (blob) ch.postMessage({ t: 'prop-img', hash: d.hash, blob }); }
 };
+/** Everything a local page (camera output, mirror) needs: my avatar, and everyone else's in a room. */
+function postLocalState(ch) {
+  const post = (msg) => { try { ch.postMessage(msg); } catch {} };
+  const own = (msg) => post(GUEST ? wrapM(myId || 'me', msg) : msg);
+  if (room && room.order.length > 1) post({ t: 'members', order: [...room.order], names: room.names, free: room.free });
+  post({ t: 'view', ...(GUEST ? hostView || view : view) }); // the host's (its avatar is the page's main one)
+  if (GUEST) own({ t: 'mview', ...ownView(view) });
+  if (modelBuf) own({ t: 'model', id: modelId, buf: modelBuf.slice(0) });
+  own({ t: 'style', ...style });
+  own({ t: 'props', list: publicProps() });
+  if (GUEST) own(permMsg());
+  for (const id of room?.order || []) if (id !== (myId || 'h')) postMemberState(ch, id);
+}
+/** Another avatar of the room (look, props, switches, model) to a local page. */
+function postMemberState(ch, id) {
+  const post = (msg) => { try { ch.postMessage(id === 'h' ? msg : wrapM(id, msg)); } catch {} };
+  if (GUEST) { // what I have of them is in my preview
+    const slot = room.slot(id);
+    if (!slot) return;
+    post({ t: 'style', ...slot.style });
+    if (id !== 'h') post({ t: 'mview', ...slot.ownView });
+    post({ t: 'props', list: slot.props });
+    post({ t: 'perm', ...slot.perm });
+    const buf = roomModelBufs.get(slot.stage.modelId);
+    if (buf) post({ t: 'model', id: slot.stage.modelId, buf: buf.slice(0) });
+    return;
+  }
+  const m = memberById(id);
+  if (!m) return;
+  if (m.style) post({ t: 'style', ...m.style });
+  if (m.view) post({ t: 'mview', ...m.view });
+  post({ t: 'props', list: m.props || [] });
+  post({ t: 'perm', ...(m.perm || {}) });
+  if (m.modelBuf) post({ t: 'model', id: m.modelId, buf: m.modelBuf.slice(0) });
+}
 outCh.onmessage = localPageHandler(outCh, () => showOutputState(true));
-mirCh.onmessage = localPageHandler(mirCh, () => { mirrorOpen = true; mirrorPos(); showMirrorState(true); });
+const mirrorHandler = localPageHandler(mirCh, () => { mirrorOpen = true; mirCh.postMessage(permMsg()); mirrorPos(); showMirrorState(true); });
+// you can pat, boop, slap and pull hair on your mirror, like a viewer (same permission switches)
+const mirrorAsViewer = { n: 'm', pos: { ...DEFAULT_POS } };
+mirCh.onmessage = (ev) => {
+  const d = ev.data;
+  if (d && (d.t === 'fx' || d.t === 'grab')) { onViewerMessage('mirror', mirrorAsViewer, d); return; }
+  mirrorHandler(ev);
+};
 let lastMirrorPos = '';
 // only for a viewer in Full screen mode: if they leave it (or leave), yours goes away too
 const mirrorTarget = () => { const v = viewers.get(selectedViewer); return v && v.state?.mode === 'screen' && (v.motion?.open || v.model?.open) ? v : null; };
@@ -864,10 +967,14 @@ function mirrorPos() {
   const p = { ...v.pos, zone: v.state?.zone };
   const msg = { t: 'pos', x: p.x, y: p.y, s: p.s, tb: !!p.tb, zone: p.zone || null };
   const idle = v.rx?.s === 'hidden'; // their avatar faded out (no tracking for 30 s): so does yours
-  const key = JSON.stringify(msg) + idle;
+  const mpos = room?.free ? v.mpos || {} : {};
+  const key = JSON.stringify(msg) + idle + JSON.stringify(mpos);
   if (key === lastMirrorPos) return;
   lastMirrorPos = key;
-  try { mirCh.postMessage(msg); mirCh.postMessage({ t: 'idle', on: idle }); } catch {}
+  try {
+    mirCh.postMessage(msg); mirCh.postMessage({ t: 'idle', on: idle });
+    for (const [id, p] of Object.entries(mpos)) mirCh.postMessage(wrapM(id, { t: 'pos', ...p }));
+  } catch {}
 }
 function showMirrorState(open) {
   mirrorOpen = open;
@@ -903,15 +1010,519 @@ if (settings.output) { $('outputBg').value = settings.output.bg; $('outputSize')
 $('outputBg').onchange = $('outputSize').onchange = () => { settings.output = { bg: $('outputBg').value, size: $('outputSize').value }; saveSettings(); if (outputOpen) $('outputBtn').click(), $('outputBtn').click(); };
 
 function broadcastControl(msg) {
+  if (GUEST) { guestSend(msg); return; } // a co-host's own changes go to the host, who passes them on
   toOutput(msg);
   for (const v of viewers.values()) if (v.model?.open) { try { v.model.send(msg); } catch {} }
+  for (const mem of members.values()) sendToMember(mem, msg); // co-hosts see the host's avatar too
 }
+
+// =====================================================================================================
+// Multi-model rooms (see shared/room.js). The host lets co-hosts in (up to settings.roomModels avatars
+// in total), relays everything between everyone, and keeps the line-up (`order`, left to right).
+// =====================================================================================================
+function memberById(id) { return [...members.values()].find((m) => m.id === id) || null; }
+function hostName() { return modelName || 'Host'; }
+function wrapM(m, d) { return { t: 'mm', m, d }; }
+function roomViewers() { return [...viewers.values()].filter((v) => v.state?.rooms && v.model?.open); }
+function sendToMember(mem, msg) { if (mem.model?.open) { try { mem.model.send(msg); } catch {} } }
+
+function membersMsg() {
+  const names = { h: hostName() };
+  for (const m of members.values()) names[m.id] = m.name || 'Co-host';
+  return { t: 'members', order: [...order], names, free: !!settings.freePlace };
+}
+/** Tell everyone who's in the room and in which order. */
+function announceMembers() {
+  if (GUEST) return;
+  const msg = membersMsg();
+  for (const v of roomViewers()) { try { v.model.send(msg); } catch {} }
+  for (const m of members.values()) sendToMember(m, { ...msg, you: m.id });
+  toOutput(msg);
+  room.setMembers(msg);
+  layoutNeighbors(); renderMembersUI(); renderPlacement();
+  if (OBS_ONLY && peer?.open) setNet('ok', obsNetText());
+}
+/** A co-host's message, passed on to everyone else (viewers that understand rooms, other co-hosts, local pages, my preview). */
+function relayMember(mem, d, exceptViewer = null) {
+  const msg = wrapM(mem.id, d);
+  for (const [id, v] of viewers) if (id !== exceptViewer && v.state?.rooms && v.model?.open) { try { v.model.send(msg); } catch {} }
+  for (const m of members.values()) if (m !== mem) sendToMember(m, msg);
+  if (exceptViewer === 'mirror') { if (outputOpen) { try { outCh.postMessage(msg); } catch {} } } // the mirror did it itself
+  else toOutput(msg);
+  room.handle(mem.id, d);
+}
+/** Everything a newcomer (viewer or co-host) needs to show the co-hosts. */
+function memberStateMsgs(skipId = null) {
+  const out = [];
+  for (const m of members.values()) {
+    if (m.id === skipId) continue;
+    if (m.style) out.push(wrapM(m.id, { t: 'style', ...m.style }));
+    if (m.view) out.push(wrapM(m.id, { t: 'mview', ...m.view }));
+    out.push(wrapM(m.id, { t: 'props', list: m.props || [] }));
+    out.push(wrapM(m.id, { t: 'perm', ...(m.perm || {}) }));
+    if (m.modelId) out.push(wrapM(m.id, { t: 'model-use', id: m.modelId }));
+  }
+  return out;
+}
+async function sendMemberModel(conn, mem) {
+  if (!mem?.modelBuf || !conn?.open) return;
+  const id = mem.modelId;
+  await sendChunked(conn, 'model', { id }, mem.modelBuf, () => mem.modelId === id, (msg) => wrapM(mem.id, msg));
+}
+
+// prop images of co-hosts: fetched from their owner the first time someone needs one
+const memberImgs = new Map(), memberImgWaiters = new Map();
+async function getAnyPropImage(hash) {
+  const own = await getPropImage(hash);
+  if (own) return own;
+  if (memberImgs.has(hash)) return memberImgs.get(hash);
+  const ask = (send) => new Promise((res) => {
+    memberImgWaiters.set(hash, [...(memberImgWaiters.get(hash) || []), res]);
+    if (memberImgWaiters.get(hash).length === 1) send();
+    setTimeout(() => res(null), 60000);
+  });
+  if (GUEST) return ask(() => sendToHost({ t: 'need-prop', hash })); // the host has everyone's (or fetches them)
+  const owner = [...members.values()].find((m) => (m.props || []).some((p) => p.img === hash));
+  return owner ? ask(() => sendToMember(owner, { t: 'need-prop', hash })) : null;
+}
+const toArrayBuffer = (data) => (data instanceof ArrayBuffer ? data : ArrayBuffer.isView(data) ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : null);
+const incomingMemberImgs = new Map();
+function receivePropChunk(d) {
+  if (d.t === 'prop-begin') { incomingMemberImgs.set(d.hash, { mime: String(d.mime || ''), parts: new Array(d.chunks), got: 0 }); return; }
+  const inc = incomingMemberImgs.get(d.hash);
+  if (!inc) return;
+  if (d.t === 'prop-chunk') { if (!inc.parts[d.i]) { inc.parts[d.i] = toArrayBuffer(d.data); inc.got++; } return; }
+  incomingMemberImgs.delete(d.hash);
+  if (inc.parts.some((x) => !x) || !/^image\/(png|jpeg|gif|webp)$/.test(inc.mime)) return;
+  const blob = new Blob(inc.parts, { type: inc.mime });
+  memberImgs.set(d.hash, blob);
+  for (const r of memberImgWaiters.get(d.hash) || []) r(blob);
+  memberImgWaiters.delete(d.hash);
+}
+
+// ---- host: co-hosts connecting ----
+function acceptMember(conn) {
+  const pid = conn.peer;
+  const reject = (reason) => conn.on('open', () => {
+    if (conn.label === 'model') { try { conn.send({ t: 'bye', reason, max: maxModels() }); } catch {} }
+    setTimeout(() => conn.close(), 500);
+  });
+  if (!members.has(pid) && (maxModels() <= 1 || members.size + 1 >= maxModels())) { reject(maxModels() <= 1 ? 'no-cohosts' : 'models-full'); return; }
+  let mem = members.get(pid);
+  if (!mem) { mem = { id: 'c' + (++memberSeq), pid, name: String(conn.metadata?.name || '').slice(0, 24), perm: {}, props: [], lastHeard: performance.now() }; members.set(pid, mem); }
+  if (conn.label === 'model') {
+    mem.model = conn;
+    conn.on('data', (d) => onMemberMessage(mem, d));
+    conn.on('open', () => {
+      if (!order.includes(mem.id)) order.push(mem.id);
+      // the co-host gets the host's avatar and the others, like a viewer would
+      sendToMember(mem, { ...membersMsg(), you: mem.id });
+      sendToMember(mem, { t: 'view', ...view });
+      sendToMember(mem, { t: 'style', ...style });
+      sendToMember(mem, { t: 'props', list: publicProps() });
+      sendToMember(mem, permMsg());
+      if (modelBuf) sendToMember(mem, { t: 'model-use', id: modelId });
+      for (const msg of memberStateMsgs(mem.id)) sendToMember(mem, msg);
+      sendViewersToMembers(true);
+      announceMembers();
+    });
+  } else {
+    mem.motion = conn;
+    conn.on('data', (d) => onMemberMotion(mem, d));
+  }
+  const gone = () => {
+    if (mem.model === conn) mem.model = null;
+    if (mem.motion === conn) mem.motion = null;
+    if (!mem.model && !mem.motion) dropMember(pid);
+  };
+  conn.on('close', gone);
+  conn.on('error', () => conn.close());
+}
+function dropMember(pid) {
+  const mem = members.get(pid);
+  if (!mem) return;
+  members.delete(pid);
+  order = order.filter((id) => id !== mem.id);
+  try { mem.model?.close(); mem.motion?.close(); } catch {}
+  announceMembers();
+}
+async function kickMember(mem, reason = 'kicked') {
+  sendToMember(mem, { t: 'bye', reason });
+  await new Promise((r) => setTimeout(r, 150));
+  dropMember(mem.pid);
+}
+function moveInOrder(id, dir) {
+  const i = order.indexOf(id), j = i + Math.sign(dir);
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  announceMembers();
+}
+
+function onMemberMessage(mem, d) {
+  mem.lastHeard = performance.now();
+  if (!d || typeof d !== 'object') return;
+  switch (d.t) {
+    case 'hb': return;
+    case 'bye': dropMember(mem.pid); return;
+    case 'member': mem.name = String(d.name || '').slice(0, 24); announceMembers(); return;
+    case 'model-begin': mem.incoming = { id: String(d.id), size: d.size, parts: new Array(d.chunks), got: 0 }; return;
+    case 'model-chunk': if (mem.incoming && d.id === mem.incoming.id && !mem.incoming.parts[d.i]) { mem.incoming.parts[d.i] = toArrayBuffer(d.data); mem.incoming.got++; } return;
+    case 'model-end': {
+      const inc = mem.incoming; mem.incoming = null;
+      if (!inc || inc.parts.some((x) => !x)) { sendToMember(mem, { t: 'need-model' }); return; }
+      const buf = new Uint8Array(inc.size); let off = 0;
+      for (const p of inc.parts) { buf.set(new Uint8Array(p), off); off += p.byteLength; }
+      mem.modelBuf = buf.buffer; mem.modelId = inc.id;
+      room.handle(mem.id, { t: 'model', id: inc.id, buf: buf.buffer.slice(0) });
+      toOutput(wrapM(mem.id, { t: 'model', id: inc.id, buf: buf.buffer.slice(0) }));
+      const use = wrapM(mem.id, { t: 'model-use', id: inc.id });
+      for (const v of roomViewers()) { try { v.model.send(use); } catch {} }
+      for (const m of members.values()) if (m !== mem) sendToMember(m, use);
+      renderMembersUI();
+      return;
+    }
+    case 'mstyle': { const { t, ...st } = d; mem.style = st; relayMember(mem, { t: 'style', ...st }); return; }
+    case 'mview': mem.view = ownView(d); relayMember(mem, { t: 'mview', ...mem.view }); return;
+    case 'mprops': mem.props = Array.isArray(d.list) ? d.list.slice(0, 64) : []; relayMember(mem, { t: 'props', list: mem.props }); return;
+    case 'mperm': mem.perm = { grab: !!d.grab, pat: !!d.pat, slap: !!d.slap }; relayMember(mem, { t: 'perm', ...mem.perm }); return;
+    case 'grab': { // pulling their own hair in their preview
+      const p = Array.isArray(d.p) && d.p.length === 3 && d.p.every(Number.isFinite) ? d.p : null;
+      relayMember(mem, { t: 'grab', k: 'o', j: Number.isInteger(d.j) ? d.j : -1, p });
+      return;
+    }
+    case 'fx': if (['pat', 'boop', 'slap'].includes(d.k)) relayMember(mem, { t: 'fx', k: d.k, r: d.r, d: d.d }); return;
+    case 'move': moveInOrder(mem.id, d.dir); return;
+    case 'mpos': { // free placement on a full-screen viewer
+      if (!settings.freePlace) return;
+      const v = viewers.get(String(d.key));
+      if (!v) return;
+      v.mpos = v.mpos || {};
+      v.mpos[mem.id] = { x: +d.x, y: +d.y, s: +d.s, tb: !!d.tb };
+      if (v.model?.open && v.state?.rooms) { try { v.model.send(wrapM(mem.id, { t: 'pos', ...v.mpos[mem.id] })); } catch {} }
+      if (mirrorTarget() === v) { lastMirrorPos = ''; mirrorPos(); }
+      sendViewersToMembers(); renderPlacement();
+      return;
+    }
+    case 'need-model':
+      if (d.m && d.m !== 'h') { const o = memberById(d.m); if (o) for (const msg of memberStateMsgs().filter((x) => x.m === o.id && x.d.t !== 'model-use')) sendToMember(mem, msg); }
+      mem.sending = (mem.sending || 0) + 1;
+      (d.m && d.m !== 'h' ? sendMemberModel(mem.model, memberById(d.m)) : mem.model?.open ? sendModel(mem.model) : Promise.resolve())
+        .finally(() => { mem.sending--; });
+      return;
+    case 'need-prop': if (mem.model?.open) sendPropImage(mem.model, String(d.hash)); return;
+    case 'prop-begin': case 'prop-chunk': case 'prop-end': receivePropChunk(d); return;
+  }
+}
+function onMemberMotion(mem, d) {
+  mem.lastHeard = performance.now();
+  if (!d || d.t !== 'm') return;
+  const frame = { ...d, m: mem.id };
+  room.motion(mem.id, frame);
+  toOutput(frame);
+  for (const v of viewers.values()) {
+    if (!v.motion?.open || !v.state?.rooms) continue;
+    if ((v.motion.dataChannel?.bufferedAmount ?? 0) > MOTION_MAX_BUFFERED) continue;
+    try { v.motion.send(frame); } catch {}
+  }
+  for (const m of members.values()) if (m !== mem && m.motion?.open) { try { m.motion.send(frame); } catch {} }
+}
+// co-hosts are pinged too, and dropped when silent
+setInterval(() => {
+  if (GUEST) return;
+  const now = performance.now();
+  for (const [pid, m] of members) {
+    sendToMember(m, { t: 'hb' });
+    // a big model on its way can hold up the pings behind it: more patience meanwhile
+    if (now - m.lastHeard > HEARTBEAT_TIMEOUT_MS * (m.incoming || m.sending ? 3 : 1)) dropMember(pid);
+  }
+}, HEARTBEAT_MS);
+
+/** Co-hosts placing themselves need the full-screen viewers' screens: send them a summary. */
+let viewersToMembersTimer = null;
+function sendViewersToMembers(now = false) {
+  if (GUEST || !members.size) return;
+  const go = () => {
+    viewersToMembersTimer = null;
+    const list = [...viewers.entries()].filter(([, v]) => v.state?.rooms).map(([key, v]) => ({ key, n: v.n, name: viewerLabel(v), state: v.state, pos: v.pos, mpos: v.mpos || {} }));
+    for (const m of members.values()) sendToMember(m, { t: 'viewers', list });
+  };
+  if (now) { clearTimeout(viewersToMembersTimer); go(); }
+  else if (!viewersToMembersTimer) viewersToMembersTimer = setTimeout(go, 300);
+}
+
+// ---- the other avatars beside yours in the preview ----
+// the others' models are kept (latest one each) so a camera output opened later can get them
+const roomModelBufs = new Map();
+room = window.vtRoom = new Room({
+  main: stage,
+  container: $('neighbors'), stageOptions: () => ({ maxFps: 30, maxPixelRatio: 1 }), // beside you in the preview: cheaper
+  propLoader: getAnyPropImage, skip: [myId || '?'],
+  send: (msg) => { if (GUEST) sendToHost(msg); },
+  cache: {
+    get: (id) => roomModelBufs.get(id) || null,
+    put: (id, buf) => {
+      roomModelBufs.set(id, buf);
+      const used = new Set([...room.slots.values()].map((s) => s.stage.modelId).concat(id));
+      for (const k of [...roomModelBufs.keys()]) if (!used.has(k)) roomModelBufs.delete(k);
+    },
+  },
+  onLoaded: (slot) => { if (GUEST && slot.stage.modelId && roomModelBufs.has(slot.stage.modelId)) postSlotModel(slot); },
+});
+/** A guest's camera output gets the others' avatars from here (the host's own come from the host's own buffers). */
+function postSlotModel(slot) {
+  const buf = roomModelBufs.get(slot.stage.modelId);
+  if (!buf || !outputOpen) return;
+  const msg = { t: 'model', id: slot.stage.modelId, buf: buf.slice(0) };
+  try { outCh.postMessage(slot.id === 'h' ? msg : wrapM(slot.id, msg)); } catch {}
+}
+room.setView(view);
+room.setMembers({ order: ['h'] });
+room.startDepth({ main: $('stage'), base: -10 });
+if (!GUEST) room.setHostLight(style.light); // the room's lighting is yours // bigger avatars further back
+function layoutNeighbors() {
+  if (!room) return;
+  if (settings.hideOthers) for (const s of room.slots.values()) s.stage.suspended = true; // newcomers too
+  const me = myId || 'h';
+  const W = stage.canvas.clientWidth, H = stage.canvas.clientHeight;
+  if (room.order.length <= 1 || !W || !H) return;
+  const L = rowLayout(room.order, W, H, me, view.roll);
+  for (const [id, s] of room.slots) if (L[id]) s.stage.setViewport(L[id]);
+}
+new ResizeObserver(layoutNeighbors).observe($('stageWrap'));
+
+// ---- room settings + the co-host list (host) / your place in the row (everyone) ----
+function renderMembersUI() {
+  const n = room.order.length;
+  $('rowPlace').hidden = n <= 1;
+  const i = room.order.indexOf(myId || 'h');
+  $('moveLeft').disabled = i <= 0;
+  $('moveRight').disabled = i < 0 || i >= n - 1;
+  $('rowPlaceText').textContent = n > 1 ? `You're ${i + 1} of ${n} from the left` : '';
+  if (GUEST) return;
+  const box = $('cohosts');
+  box.hidden = !members.size;
+  box.innerHTML = members.size ? '<h4>Co-hosts</h4>' : '';
+  for (const m of members.values()) {
+    const row = document.createElement('div');
+    row.className = 'vrow';
+    const label = document.createElement('span');
+    label.className = 'vlabel';
+    label.textContent = (m.name || 'Co-host') + (m.modelId ? '' : ' (no avatar yet)');
+    const kick = document.createElement('button');
+    kick.textContent = '✕'; kick.title = 'Remove this co-host from the room';
+    kick.onclick = () => kickMember(m);
+    row.append(label, kick);
+    box.appendChild(row);
+  }
+}
+$('moveLeft').onclick = () => (GUEST ? sendToHost({ t: 'move', dir: -1 }) : moveInOrder('h', -1));
+$('moveRight').onclick = () => (GUEST ? sendToHost({ t: 'move', dir: 1 }) : moveInOrder('h', 1));
+// how many avatars this room takes, the host's included (1 = a normal broadcast: no co-hosts)
+function maxModels() {
+  if (OBS_ONLY) return Math.max(1, Math.min(MAX_MODELS, settings.obsModels || 1)); // 1 = just me, offline
+  return ROOM_MODE ? Math.max(2, Math.min(MAX_MODELS, settings.roomModels || 2)) : 1;
+}
+if (OBS_ONLY && ROOM_START >= 1) { settings.obsModels = Math.min(MAX_MODELS, ROOM_START); saveSettings(); }
+else if (ROOM_START >= 2) { settings.roomModels = Math.min(MAX_MODELS, ROOM_START); saveSettings(); }
+document.body.classList.toggle('roomMode', ROOM_MODE);
+document.body.classList.toggle('obsOnly', OBS_ONLY);
+if (OBS_ONLY) {
+  $('roomModels').insertAdjacentHTML('afterbegin', '<option value="1">Just me</option>');
+  $('roomSecTitle').textContent = 'OBS only';
+  $('viewersSecTitle').textContent = 'Co-hosts';
+  $('stop').textContent = 'Stop';
+}
+$('roomModels').value = String(maxModels());
+$('roomModels').onchange = () => {
+  const n = Math.max(OBS_ONLY ? 1 : 2, Math.min(MAX_MODELS, Number($('roomModels').value) || 2));
+  if (OBS_ONLY) settings.obsModels = n; else settings.roomModels = n;
+  saveSettings();
+  // fewer spots than co-hosts: the last ones to join leave
+  const extra = [...members.values()].slice(Math.max(0, maxModels() - 1));
+  for (const m of extra) kickMember(m, 'models-full');
+  syncObsPeer();
+};
+function obsNetText() { return members.size ? 'Online, co-hosts in the room' : 'Online, waiting for co-hosts'; }
+/** OBS only: only online (with a room code) while co-hosts are allowed; otherwise nothing leaves this computer. */
+function syncObsPeer() {
+  if (!OBS_ONLY) return;
+  const want = maxModels() >= 2;
+  document.body.classList.toggle('offline', !want);
+  if (want && !peer) { stopping = false; sigFailures = 0; idTakenTries = 0; setNet('warn', 'Connecting to the connection server…'); startPeer(DEV_CODE || undefined); }
+  else if (!want) {
+    if (peer) {
+      for (const m of [...members.values()]) kickMember(m, 'no-cohosts');
+      const p = peer; peer = null; // first, so its own events are ignored
+      setTimeout(() => { try { p.destroy(); } catch {} }, 300);
+    }
+    setNet('ok', 'Offline: nothing leaves this computer');
+  }
+}
+// hide the others in my preview (only here: nobody else is affected)
+function applyHideOthers() {
+  const on = !!settings.hideOthers;
+  $('neighbors').hidden = on;
+  for (const s of room.slots.values()) s.stage.suspended = on; // not drawn at all meanwhile
+}
+$('hideOthers').checked = !!settings.hideOthers;
+$('hideOthers').onchange = () => { settings.hideOthers = $('hideOthers').checked; saveSettings(); applyHideOthers(); };
+$('freePlace').checked = !!settings.freePlace;
+$('freePlace').onchange = () => { settings.freePlace = $('freePlace').checked; saveSettings(); announceMembers(); };
+
+// =====================================================================================================
+// Co-host side: join the host's room, send it my avatar / movements / settings, show the others.
+// =====================================================================================================
+function sendToHost(msg) { if (host?.model?.open) { try { host.model.send(msg); } catch {} } }
+function ownToOutput(msg) { toOutput(GUEST ? wrapM(myId || 'me', msg) : msg); }
+function guestSend(msg) {
+  ownToOutput(msg);
+  switch (msg.t) {
+    case 'style': { const { t, ...st } = msg; sendToHost({ t: 'mstyle', ...st }); return; }
+    case 'view': { const v = { t: 'mview', ...ownView(msg) }; ownToOutput(v); sendToHost(v); return; } // only my own avatar's
+    case 'props': sendToHost({ t: 'mprops', list: msg.list }); return;
+    case 'perm': sendToHost({ t: 'mperm', grab: msg.grab, pat: msg.pat, slap: msg.slap }); return;
+    case 'grab': sendToHost({ t: 'grab', j: msg.j, p: msg.p }); return;
+    case 'fx': sendToHost({ t: 'fx', k: msg.k, r: msg.r, d: msg.d }); return;
+    case 'bye': sendToHost({ t: 'bye' }); return;
+  }
+}
+function joinHost() {
+  if (!GUEST || guestStopped) return;
+  clearTimeout(guestRetry);
+  const old = host;
+  try { old?.peer?.destroy(); } catch {}
+  const p = new window.Peer(peerOptions());
+  const h = host = { peer: p };
+  setNet('warn', `Joining room ${GUEST_CODE}…`);
+  const retry = (text, ms = 4000) => {
+    if (h !== host || guestStopped) return;
+    if (text) setNet('bad', text);
+    clearTimeout(guestRetry);
+    guestRetry = setTimeout(joinHost, ms);
+  };
+  p.on('open', () => {
+    if (h !== host) return;
+    const meta = { role: 'member', name: GUEST_NAME || modelName || '' };
+    const m = h.model = p.connect(PEER_PREFIX + GUEST_CODE, { label: 'model', reliable: true, serialization: 'binary', metadata: meta });
+    const mo = h.motion = p.connect(PEER_PREFIX + GUEST_CODE, { label: 'motion', reliable: false, serialization: 'json', metadata: meta });
+    m.on('open', () => {
+      if (h !== host) return;
+      h.lastHeard = performance.now();
+      setNet('ok', `In room ${GUEST_CODE} with your avatar`);
+      sendToHost({ t: 'member', name: meta.name });
+      uploadModel();
+      broadcastControl({ t: 'style', ...style });
+      broadcastControl({ t: 'view', ...view });
+      broadcastControl({ t: 'props', list: publicProps() });
+      broadcastControl(permMsg());
+    });
+    m.on('data', (d) => { if (h === host) onHostMessage(d); });
+    mo.on('data', (d) => {
+      if (h !== host || !d || d.t !== 'm') return;
+      h.lastHeard = performance.now();
+      if (d.m === myId) return;
+      room.motion(d.m || 'h', d);
+      toOutput(d);
+    });
+    for (const c of [m, mo]) { c.on('close', () => retry('Lost the room. Rejoining…')); c.on('error', () => retry('Lost the room. Rejoining…')); }
+  });
+  p.on('error', (err) => {
+    if (h !== host) return;
+    if (err.type === 'peer-unavailable') retry(`Room ${GUEST_CODE} isn't online. Retrying…`, 5000);
+    else retry('Connection problem (' + err.type + '). Retrying…');
+  });
+}
+async function uploadModel() {
+  if (!GUEST || !modelBuf || !host?.model?.open) return;
+  const id = modelId, h = host;
+  h.sending = true;
+  try { await sendChunked(h.model, 'model', { id }, modelBuf, () => id === modelId); } finally { h.sending = false; }
+}
+// the host's messages: its own avatar unwrapped, the other co-hosts wrapped
+async function onHostMessage(d) {
+  if (!d || typeof d !== 'object') return;
+  host.lastHeard = performance.now();
+  switch (d.t) {
+    case 'hb': return;
+    case 'bye':
+      if (d.reason === 'kicked') { guestStopped = true; setNet('bad', 'The host removed you from the room.'); }
+      else if (d.reason === 'models-full') { setNet('bad', 'The room is full. Retrying…'); clearTimeout(guestRetry); guestRetry = setTimeout(joinHost, 15000); }
+      else if (d.reason === 'no-cohosts') { guestStopped = true; setNet('bad', 'This room doesn\'t take co-hosts (the host has it set to one avatar).'); }
+      else { setNet('warn', 'The host ended the room. Waiting…'); clearTimeout(guestRetry); guestRetry = setTimeout(joinHost, 5000); }
+      room.setMembers({ order: [] });
+      layoutNeighbors(); renderMembersUI();
+      return;
+    case 'members':
+      const newId = d.you && d.you !== myId;
+      if (d.you) { myId = d.you; room.skip = new Set([myId]); }
+      room.setMembers(d);
+      if (newId && outputOpen) postLocalState(outCh); // my avatar now has its place in the room
+      else toOutput(d);
+      layoutNeighbors(); renderMembersUI(); renderPlacement();
+      return;
+    case 'mm':
+      if (d.m === myId) { // someone touching MY avatar (a viewer's pat, boop, slap, pull)
+        const x = d.d || {};
+        if (x.t === 'fx') { if (x.k === 'pat') stage.fx.patting(+x.r); else if (x.k === 'boop') stage.fx.boop(); else if (x.k === 'slap') stage.fx.slap(x.d); }
+        else if (x.t === 'grab' && typeof x.k === 'string') stage.setGrab('r' + x.k, Number.isInteger(x.j) ? x.j : -1, Array.isArray(x.p) ? x.p : null, true);
+        ownToOutput(x);
+        return;
+      }
+      await room.handle(d.m, d.d);
+      toOutput(d);
+      return;
+    case 'view': updateView(d, true); toOutput(d); return;
+    case 'style':
+      hostLight = normalizeStyle(d).light;
+      stage.setStyle({ ...style, light: hostLight });
+      room.setHostLight(hostLight);
+      room.handle('h', d);
+      toOutput(d);
+      return;
+    case 'viewers': guestViewers = Array.isArray(d.list) ? d.list : []; syncGuestViewers(); return;
+    case 'need-model': uploadModel(); return;
+    case 'need-prop': sendPropImage(host.model, String(d.hash)); return;
+    case 'prop-begin': case 'prop-chunk': case 'prop-end': receivePropChunk(d); return;
+    case 'pos': return; // positions on viewers' screens are between the host and them
+    default: // the host's own avatar: model, props, perm, fx, grab…
+      await room.handle('h', d);
+      if (!/^model-/.test(d.t)) toOutput(d);
+  }
+}
+setInterval(() => {
+  if (!GUEST || !host?.model?.open) return;
+  sendToHost({ t: 'hb' });
+  const busy = host.sending || [...room.slots.values()].some((s) => s.incoming);
+  if (performance.now() - (host.lastHeard || 0) > HEARTBEAT_TIMEOUT_MS * (busy ? 3 : 1)) { try { host.model.close(); } catch {} }
+}, HEARTBEAT_MS);
+/** Co-host placing their own avatar: the host's viewer list, as local stand-ins for the placement view. */
+function syncGuestViewers() {
+  if (!GUEST) return;
+  const keep = new Set();
+  for (const g of guestViewers) {
+    keep.add(g.key);
+    let v = viewers.get(g.key);
+    if (!v) { v = { n: g.n, pos: { ...DEFAULT_POS }, guest: true }; viewers.set(g.key, v); }
+    v.state = { ...g.state, name: g.name };
+    if (!v.dragging) { v.pos = g.pos || v.pos; v.mpos = g.mpos || {}; }
+    v.remoteOpen = true;
+  }
+  for (const k of [...viewers.keys()]) if (!keep.has(k)) viewers.delete(k);
+  updateViewers();
+}
+if (GUEST) { $('stop').textContent = 'Leave room'; joinHost(); }
+if (OBS_ONLY) { syncObsPeer(); setTimeout(() => { if (!outputOpen) $('outputBtn').click(); }, 800); } // the camera output is the point
+applyHideOthers();
+layoutNeighbors(); renderMembersUI();
+
 
 async function sayBye(reason) {
   stopping = true;
   broadcastControl({ t: 'bye', reason });
   await new Promise((r) => setTimeout(r, 150)); // let it flush
   for (const id of [...viewers.keys()]) dropViewer(id);
+  for (const pid of [...members.keys()]) { const m = members.get(pid); try { m.model?.close(); m.motion?.close(); } catch {} members.delete(pid); }
+  if (GUEST) { guestStopped = true; clearTimeout(guestRetry); try { host?.peer?.destroy(); } catch {} }
   try { peer?.destroy(); } catch {}
 }
 $('stop').onclick = async () => {
@@ -944,12 +1555,13 @@ $('updateGo').onclick = () => $('stop').click();
 
 // What this viewer currently sees (reported by the viewer itself; older viewers don't report).
 function viewerSees(v) {
+  if (v.guest) return ['ok', 'Watching the room', ''];
   const rx = v.rx;
   if (!v.motion?.open || !v.model?.open) return ['warn', 'Connecting…', 'The connection is still being set up'];
   if (!rx) return [modelBuf ? 'warn' : 'muted', modelBuf ? 'Connected' : 'Waiting for your avatar', 'This viewer runs an older version and doesn\'t report what it sees'];
   if (rx.s === 'loading') return ['warn', `Loading your avatar… ${Math.round((rx.p || 0) * 100)}%`, 'Your model is being sent / loaded on their side'];
   if (rx.s === 'error') return ['bad', 'Avatar failed to load', 'Their app couldn\'t open your model'];
-  if (rx.s === 'hidden') return ['muted', 'Avatar hidden (you\'re not tracking)', 'Full screen hides your avatar after 30 s without tracking'];
+  if (rx.s === 'hidden') return ['muted', 'Avatar hidden (you\'re not tracking)', 'Hidden on full screen after 30 s without tracking'];
   if (rx.s === 'ready') return ['ok', '● Sees you', 'Your avatar is on their screen'];
   return ['muted', modelBuf ? 'Waiting for your avatar' : 'Waiting for you to load an avatar', ''];
 }
@@ -960,8 +1572,9 @@ const viewerLabel = (v) => v.state?.name || `Viewer ${v.n}`;
 $('maxViewers').value = String(settings.maxViewers || 0);
 $('maxViewers').onchange = () => { settings.maxViewers = Number($('maxViewers').value) || 0; saveSettings(); updateViewers(); };
 
+const isLive = (v) => v.motion?.open || v.model?.open || v.remoteOpen; // remoteOpen: a co-host's copy of the host's viewer list
 function updateViewers() {
-  const live = [...viewers.entries()].filter(([, v]) => v.motion?.open || v.model?.open);
+  const live = [...viewers.entries()].filter(([, v]) => isLive(v));
   $('viewerCount').textContent = settings.maxViewers ? `(${live.length} / ${settings.maxViewers})` : live.length ? `(${live.length})` : '';
   const box = $('viewers');
   box.classList.toggle('muted', !live.length);
@@ -990,7 +1603,7 @@ function updateViewers() {
       box.appendChild(row);
     }
   }
-  if (peer?.open) setNet('ok', live.length ? 'Online, streaming' : 'Online, waiting for viewers');
+  if (peer?.open) setNet('ok', OBS_ONLY ? obsNetText() : live.length ? 'Online, streaming' : 'Online, waiting for viewers');
   refreshViewerSelect();
 }
 
@@ -1004,6 +1617,7 @@ function onViewerMessage(id, v, d) {
   v.lastHeard = performance.now();
   if (!d || typeof d !== 'object') return;
   if (d.t === 'bye') { dropViewer(id); return; }
+  if (d.m && (d.t === 'fx' || d.t === 'grab' || d.t === 'need-model')) { onViewerToMember(id, v, d); return; }
   if (d.t === 'fx') { // a viewer's headpat / boop / slap
     const now = performance.now();
     if (d.k === 'slap') {
@@ -1038,7 +1652,7 @@ function onViewerMessage(id, v, d) {
   v.hello = true;
   v.state = {
     name: String(d.name || '').slice(0, 24), mode: d.mode, aspect: Number(d.aspect) || 16 / 9,
-    zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, work: d.work || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null,
+    zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, work: d.work || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null, rooms: !!d.rooms,
   };
   if (d.pos && !v.dragging) v.pos = { ...DEFAULT_POS, ...d.pos };
   if (!v.pos.tb) { toFullArea(v); sendPos(v, true); }
@@ -1048,28 +1662,76 @@ function onViewerMessage(id, v, d) {
     v.model.send({ t: 'style', ...style });
     v.model.send(permMsg());
     offerModel(v);
+    if (d.rooms && order.length > 1) { // the co-hosts' avatars too
+      v.model.send(membersMsg());
+      for (const msg of memberStateMsgs()) v.model.send(msg);
+      for (const [mid, p] of Object.entries(v.mpos || {})) v.model.send(wrapM(mid, { t: 'pos', ...p }));
+    }
   }
   updateViewers();
   renderPlacement();
+  sendViewersToMembers();
+}
+/** A viewer touching a co-host's avatar: each owner's own permission switches apply. */
+function onViewerToMember(id, v, d) {
+  const mem = memberById(String(d.m));
+  if (!mem) return;
+  if (d.t === 'need-model') {
+    if (!v.model?.open) return;
+    try { // its look and switches too (a viewer asks when it couldn't add that avatar in time)
+      if (mem.style) v.model.send(wrapM(mem.id, { t: 'style', ...mem.style }));
+      if (mem.view) v.model.send(wrapM(mem.id, { t: 'mview', ...mem.view }));
+      v.model.send(wrapM(mem.id, { t: 'props', list: mem.props || [] }));
+      v.model.send(wrapM(mem.id, { t: 'perm', ...(mem.perm || {}) }));
+    } catch {}
+    sendMemberModel(v.model, mem);
+    return;
+  }
+  const perm = mem.perm || {};
+  const now = performance.now();
+  v.memberFx = v.memberFx || {};
+  const last = v.memberFx[mem.id] = v.memberFx[mem.id] || {};
+  if (d.t === 'grab') {
+    if (!perm.grab) return;
+    const p = Array.isArray(d.p) && d.p.length === 3 && d.p.every(Number.isFinite) ? d.p : null;
+    relayMemberFromViewer(mem, { t: 'grab', k: 'v' + v.n, j: Number.isInteger(d.j) ? d.j : -1, p }, id);
+    return;
+  }
+  if (d.k === 'slap') {
+    if (!perm.slap || now - (last.slap || 0) < 300) return;
+    last.slap = now;
+    const dir = Array.isArray(d.d) && d.d.length === 3 && d.d.every((x) => Number.isFinite(+x)) ? d.d.map((x) => Math.max(-1, Math.min(1, +x))) : null;
+    relayMemberFromViewer(mem, { t: 'fx', k: 'slap', d: dir }, id);
+    return;
+  }
+  if (!perm.pat || (d.k !== 'pat' && d.k !== 'boop')) return;
+  if (d.k === 'boop') { if (now - (last.boop || 0) < 250) return; last.boop = now; }
+  relayMemberFromViewer(mem, { t: 'fx', k: d.k, r: Number.isFinite(+d.r) ? +d.r : undefined }, id);
+}
+// the toucher's own app already shows it, but the others (and the owner) need it; the mirror has no
+// network connection, so it gets it like everyone else
+function relayMemberFromViewer(mem, d, fromId) {
+  sendToMember(mem, wrapM(mem.id, d)); // the owner (their onHostMessage applies it to their own avatar)
+  relayMember(mem, d, fromId);
 }
 
 // send a big binary in chunks with back-pressure: kind-begin / kind-chunk / kind-end
-async function sendChunked(conn, kind, meta, buf, stillWanted = () => true) {
+async function sendChunked(conn, kind, meta, buf, stillWanted = () => true, wrap = (m) => m) {
   const chunks = Math.ceil(buf.byteLength / MODEL_CHUNK);
-  conn.send({ t: kind + '-begin', ...meta, size: buf.byteLength, chunks });
+  conn.send(wrap({ t: kind + '-begin', ...meta, size: buf.byteLength, chunks }));
   for (let i = 0; i < chunks; i++) {
     if (!conn.open || !stillWanted()) return false;
     while (conn.dataChannel && conn.dataChannel.bufferedAmount > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30));
-    conn.send({ t: kind + '-chunk', ...meta, i, data: buf.slice(i * MODEL_CHUNK, (i + 1) * MODEL_CHUNK) });
+    conn.send(wrap({ t: kind + '-chunk', ...meta, i, data: buf.slice(i * MODEL_CHUNK, (i + 1) * MODEL_CHUNK) }));
     if (i % 16 === 15) await new Promise((r) => setTimeout(r, 0));
   }
-  conn.send({ t: kind + '-end', ...meta });
+  conn.send(wrap({ t: kind + '-end', ...meta }));
   return true;
 }
 
 async function sendPropImage(conn, hash) {
-  const blob = await getPropImage(hash);
-  if (!blob) return;
+  const blob = await getAnyPropImage(hash);
+  if (!blob || !conn?.open) return;
   await sendChunked(conn, 'prop', { hash, mime: blob.type }, await blob.arrayBuffer());
 }
 
@@ -1101,7 +1763,7 @@ document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => {
 }));
 
 function refreshViewerSelect() {
-  const live = [...viewers.entries()].filter(([, v]) => v.motion?.open || v.model?.open);
+  const live = [...viewers.entries()].filter(([, v]) => isLive(v));
   if (!live.some(([id]) => id === selectedViewer)) {
     const scr = live.find(([, v]) => v.state?.mode === 'screen');
     selectedViewer = (scr || live[0] || [null])[0];
@@ -1205,10 +1867,10 @@ function renderPlacement() {
   const v = viewers.get(selectedViewer);
   const msg = $('placeMsg');
   const show = (text) => { msg.hidden = false; msg.innerHTML = text; $('screenArea').hidden = true; $('placeBar').hidden = !v; };
-  if (!v) return show('Nobody is watching yet. Once a friend joins in <b>Full screen</b> mode you can place your avatar on their screen here.');
+  if (!v) return show('Nobody is watching yet. Viewers in <b>Full screen</b> mode show up here.');
   if (!v.state) return show('Waiting for this viewer’s screen info…');
   if (v.state.mode !== 'screen') {
-    return show(`<b>${viewerLabel(v).replace(/</g, '&lt;')}</b> is using the ${MODE_LABEL[v.state.mode] || v.state.mode} mode, so the avatar sits in their own window.<br>Framing, zoom and rotation from the <b>My avatar</b> tab still apply.<br>They can switch to <b>Full screen</b> any time from their tray icon.`);
+    return show(`<b>${viewerLabel(v).replace(/</g, '&lt;')}</b> uses the ${MODE_LABEL[v.state.mode] || v.state.mode}, so there's nothing to place.<br>They can switch to <b>Full screen</b> from their tray icon.`);
   }
   msg.hidden = true; $('screenArea').hidden = false; $('placeBar').hidden = false;
 
@@ -1243,16 +1905,51 @@ function renderPlacement() {
   if (vid.srcObject !== (v.stream || null)) vid.srcObject = v.stream || null;
   $('noVideo').hidden = !!v.stream;
   $('noVideo').innerHTML = v.state.sharing ? 'Connecting to screen preview…'
-    : 'Screen preview is off.<br>Your friend can turn it on from their tray icon. Until then you\'re placing the avatar on a blank outline of their monitor.';
+    : 'Screen preview is off (they can turn it on from their tray icon).<br>This is an outline of their monitor.';
 
   const zp = zoneRectPx();
-  const p = clampPos(v.pos, zp);
-  const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
-  const ab = $('avBox').style;
-  ab.left = p.x * zp.w - boxW / 2 + 'px'; ab.top = p.y * zp.h - boxH + 'px';
-  ab.width = boxW + 'px'; ab.height = boxH + 'px';
+  const me = myId || 'h';
+  const place = (el, pos) => {
+    const p = clampPos(pos, zp);
+    const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
+    Object.assign(el.style, { left: p.x * zp.w - boxW / 2 + 'px', top: p.y * zp.h - boxH + 'px', width: boxW + 'px', height: boxH + 'px' });
+  };
+  place($('avBox'), roomPos(v, me));
   $('avName').textContent = modelName || 'Avatar';
+  $('avBox').classList.toggle('locked', GUEST && !room.free);
+  $('avBox').title = GUEST && !room.free ? 'You stand in the row next to the host' : '';
+  $('avHandle').hidden = GUEST && !room.free;
+  // the other avatars of the room
+  const others = room.order.length > 1 ? room.order.filter((id) => id !== me) : [];
+  for (const [id, el] of memberBoxes) if (!others.includes(id)) { el.remove(); memberBoxes.delete(id); }
+  for (const id of others) {
+    let el = memberBoxes.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'mbox';
+      el.innerHTML = '<span class="name"></span><svg viewBox="0 0 60 100"><circle cx="30" cy="18" r="13" fill="#fff"/><path d="M8 100 V58 q0-20 22-20 q22 0 22 20 V100z" fill="#fff"/></svg>';
+      $('zoneBox').insertBefore(el, $('avBox'));
+      memberBoxes.set(id, el);
+    }
+    el.querySelector('.name').textContent = room.names[id] || (id === 'h' ? 'Host' : 'Co-host');
+    place(el, roomPos(v, id));
+  }
   renderScreenProps();
+}
+const memberBoxes = new Map(); // id → ghost box of another avatar of the room in the placement view
+
+/** Where an avatar of the room stands on a full-screen viewer: its own place (free placement), or next to the host in the row. */
+function roomPos(v, id) {
+  if (id !== 'h' && room.free && v.mpos?.[id]) return v.mpos[id];
+  const zp = zoneRectPx();
+  return rowPos(room.order, id, v.pos, zp.w / zp.h, view.roll); // v.pos: the middle of the row
+}
+/** A co-host placing their own avatar on a full-screen viewer (when the host allows it; the host can't move them then). */
+function setMemberPos(v, id, patch) {
+  v.mpos = v.mpos || {};
+  const p = v.mpos[id] = clampPos({ ...roomPos(v, id), ...patch, tb: true }, zoneRectPx());
+  renderPlacement();
+  sendToHost({ t: 'mpos', key: selectedViewer, x: p.x, y: p.y, s: p.s, tb: true });
 }
 new ResizeObserver(() => renderPlacement()).observe($('stageWrap'));
 
@@ -1266,7 +1963,15 @@ function sendPos(v, force = false) {
 }
 
 function updatePos(v, patch) {
-  v.pos = clampPos({ ...v.pos, ...patch }, zoneRectPx());
+  if (GUEST) { if (room.free) setMemberPos(v, myId, patch); return; } // a co-host moves only their own avatar
+  const zp = zoneRectPx();
+  v.pos = clampPos({ ...v.pos, ...patch }, zp);
+  const n = room.order.length, i = room.order.indexOf('h');
+  if (n > 1 && i >= 0) { // keep the row's middle where the whole row fits (no dead zone when dragging back)
+    const ratio = zp.w / zp.h;
+    const r = (view.roll || 0) * Math.PI / 180;
+    v.pos.x = rowPos(room.order, 'h', v.pos, ratio, view.roll).x - (i - (n - 1) / 2) * SLOT_STEP * v.pos.s / ratio * Math.cos(r);
+  }
   renderPlacement();
   sendPos(v);
 }
@@ -1278,7 +1983,9 @@ $('avBox').addEventListener('pointerdown', (e) => {
   if (!v || e.button !== 0) return;
   e.preventDefault();
   $('avBox').setPointerCapture(e.pointerId);
-  drag = { v, resize: e.target.id === 'avHandle', x: e.clientX, y: e.clientY, start: { ...v.pos } };
+  if (GUEST && !room.free) return;
+  // the host moves the whole row (v.pos is its middle), a co-host only their own avatar
+  drag = { v, resize: e.target.id === 'avHandle', x: e.clientX, y: e.clientY, start: { ...(GUEST ? roomPos(v, myId) : v.pos) } };
   v.dragging = true;
   $('avBox').classList.add('dragging');
 });
@@ -1295,14 +2002,14 @@ $('avBox').addEventListener('pointermove', (e) => {
     updatePos(drag.v, { x: drag.start.x + dx / zp.w, y });
   }
 });
-const endDrag = () => { if (!drag) return; drag.v.dragging = false; sendPos(drag.v, true); drag = null; $('avBox').classList.remove('dragging', 'snapped'); };
+const endDrag = () => { if (!drag) return; drag.v.dragging = false; if (!GUEST) sendPos(drag.v, true); drag = null; $('avBox').classList.remove('dragging', 'snapped'); };
 $('avBox').addEventListener('pointerup', endDrag);
 $('avBox').addEventListener('pointercancel', endDrag);
 $('screenArea').addEventListener('wheel', (e) => {
   const v = viewers.get(selectedViewer);
   if (!v) return;
   e.preventDefault();
-  updatePos(v, { s: v.pos.s * (e.deltaY < 0 ? 1.06 : 1 / 1.06) });
+  updatePos(v, { s: roomPos(v, myId || 'h').s * (e.deltaY < 0 ? 1.06 : 1 / 1.06) });
 }, { passive: false });
 $('placeAdd').onclick = () => $('placeFile').click();
 $('placeFile').onchange = async () => { for (const f of $('placeFile').files) await addPropFile(f, { onScreen: true }); $('placeFile').value = ''; };
@@ -1933,12 +2640,22 @@ function sendFrame(frame, now, force = false) {
   if (force || now - lastSend >= SEND_INTERVAL_MS) {
     lastSend = now;
     frame.n = ++frameSeq; // lets viewers ignore frames that arrive late / out of order
+    if (GUEST) { // a co-host: to the host, who passes it on
+      toOutput({ ...frame, m: myId || 'me' });
+      const mo = host?.motion;
+      if (mo?.open && (mo.dataChannel?.bufferedAmount ?? 0) <= MOTION_MAX_BUFFERED) { try { mo.send(frame); } catch {} }
+      return;
+    }
     toOutput(frame);
     for (const v of viewers.values()) {
       if (!v.motion?.open) continue;
       // a backed-up channel means the network can't keep up: drop this frame rather than queue it
       if ((v.motion.dataChannel?.bufferedAmount ?? 0) > MOTION_MAX_BUFFERED) { v.skipped = (v.skipped || 0) + 1; continue; }
       try { v.motion.send(frame); } catch {}
+    }
+    for (const m of members.values()) {
+      if (!m.motion?.open || (m.motion.dataChannel?.bufferedAmount ?? 0) > MOTION_MAX_BUFFERED) continue;
+      try { m.motion.send(frame); } catch {}
     }
   }
 }

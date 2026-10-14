@@ -23,7 +23,8 @@ const SYNC_VOWEL = ARKIT.map((n) => ({
 const PRESET_ORDER = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 export class AvatarStage {
-  constructor(canvas, { maxPixelRatio = 2, maxFps = 0 } = {}) {
+  constructor(canvas, { maxPixelRatio = 2, maxFps = 0, maxTexture = 0 } = {}) {
+    this.maxTexture = maxTexture; // >0: shrink the model's textures to at most this size (memory)
     this.minFrameMs = maxFps ? 1000 / maxFps - 1 : 0; // cap rendering (see-through windows are costly on Windows)
     this.lastRenderAt = 0;
     this.canvas = canvas;
@@ -64,14 +65,25 @@ export class AvatarStage {
 
     this.poseW = { stand: 1 }; // body pose cross-fade weights
     this.poseDrop = 0; this._framedDrop = 0; // how far the pose lowers the hips (bust framing follows it)
+    this.groupHead = null; // in a room with several avatars: one shared head height for everyone, so all feet are on the same floor
     this.lookTarget = new THREE.Object3D();
     this.springJoints = []; this.jointByBone = new Map();
     this.grabs = new Map(); // key → { j, p (avatar-local target), at, remote }
     this.props = new PropLayer(this);
     this.fx = new AvatarFx(this); // headpats & boops
     this._resize();
-    new ResizeObserver(() => this._resize()).observe(canvas);
+    this._ro = new ResizeObserver(() => this._resize());
+    this._ro.observe(canvas);
     this.renderer.setAnimationLoop(() => this._tick());
+  }
+
+  /** Free everything (the model, the GPU context). The stage can't be used afterwards. */
+  dispose() {
+    this.renderer.setAnimationLoop(null);
+    this._ro?.disconnect();
+    try { this.clearVRM(); } catch {}
+    this.renderer.dispose();
+    this.renderer.forceContextLoss();
   }
 
   _resize() {
@@ -104,6 +116,16 @@ export class AvatarStage {
     r.clear();
     for (const layer of [1, 0, 2, 3]) { cam.layers.set(layer); r.render(this.scene, cam); }
     cam.layers.set(0);
+  }
+
+  /** Change the frame-rate cap (0 = none) and resolution cap at runtime. */
+  setQuality({ maxFps = 0, maxPixelRatio = 2, maxTexture = this.maxTexture } = {}) {
+    this.maxTexture = maxTexture; // used by the next model load
+    this.minFrameMs = maxFps ? 1000 / maxFps - 1 : 0;
+    this.maxPixelRatio = Math.min(window.devicePixelRatio, maxPixelRatio);
+    this.renderer.setPixelRatio(this.maxPixelRatio);
+    this._w = this._h = -1; // force the drawing buffer to the new resolution
+    this._resize();
   }
 
   /** Call after changing the canvas's CSS size: resizes the drawing buffer and redraws in the same frame. */
@@ -164,6 +186,14 @@ export class AvatarStage {
     return n;
   }
 
+  /** Room framing (see groupHead); null = frame your own avatar on its own. */
+  setGroupHead(y) {
+    const v = Number.isFinite(y) ? y : null;
+    if (v === this.groupHead) return;
+    this.groupHead = v;
+    this._frameCamera();
+  }
+
   /** Height of the visible area in world units, used to convert mouse drags to pans. */
   visibleHeight() { return this._span / this.view.zoom; }
 
@@ -172,8 +202,10 @@ export class AvatarStage {
     if (this.vrm && this.headRestY != null) { headY = this.headRestY; height = headY + 0.12; }
     const { fr, zoom, px, py, el } = this.view;
     // bust framing keeps the face in view when a pose (sitting…) lowers it; full body stays put, so
-    // sitting down looks like sitting down
-    if (fr !== 'full') headY -= this.poseDrop;
+    // sitting down looks like sitting down. In a room everyone is framed from the same height and
+    // nobody follows their pose: a kneeling avatar is lower than a standing one, a short one smaller.
+    if (this.groupHead != null) { headY = this.groupHead; height = headY + 0.12; }
+    else if (fr !== 'full') headY -= this.poseDrop;
     this._framedDrop = this.poseDrop;
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
     const span = fr === 'full' ? height * 1.08 : 0.64;
@@ -196,6 +228,7 @@ export class AvatarStage {
     VRMUtils.combineSkeletons(gltf.scene);
     VRMUtils.rotateVRM0(vrm); // VRM 0.x faces -Z; make everything face the camera (+Z)
     vrm.scene.traverse((o) => { o.frustumCulled = false; });
+    if (this.maxTexture) shrinkTextures(vrm.scene, this.maxTexture);
 
     this.clearVRM();
     this.vrm = vrm;
@@ -239,6 +272,7 @@ export class AvatarStage {
     this.props.captureRest(vrm);
     this.fx.captureRest(vrm);
     this._frameCamera();
+    this.onModel?.();
     return { perfectSync: this.perfectSync, expressions: this.expressions, name: vrm.meta?.name ?? vrm.meta?.title ?? 'Avatar' };
   }
 
@@ -630,7 +664,7 @@ export class AvatarStage {
       for (const key in v) out[key] += v[key] * w;
     }
     this.poseDrop = Math.max(0, -out.hy);
-    if (Math.abs(this.poseDrop - this._framedDrop) > 0.002) this._frameCamera();
+    if (this.groupHead == null && Math.abs(this.poseDrop - this._framedDrop) > 0.002) this._frameCamera();
     return out;
   }
 
@@ -729,6 +763,33 @@ export class ExprBaseline {
 const BASE_CUES = ['mouthSmileLeft', 'mouthSmileRight', 'mouthFrownLeft', 'mouthFrownRight', 'browInnerUp', 'browOuterUpLeft', 'browOuterUpRight',
   'browDownLeft', 'browDownRight', 'eyeWideLeft', 'eyeWideRight', 'eyeSquintLeft', 'eyeSquintRight', 'noseSneerLeft', 'noseSneerRight',
   'mouthPressLeft', 'mouthPressRight', 'cheekSquintLeft', 'cheekSquintRight', 'mouthShrugLower'].map((n) => ARKIT_INDEX[n]);
+
+/**
+ * Downscale every texture of a model that's bigger than `max` px (keeping its aspect). A 4096² texture
+ * takes 64 MB of graphics memory (plus mipmaps); on a small desktop overlay 1024-2048 looks the same.
+ */
+function shrinkTextures(root, max) {
+  const done = new Set();
+  root.traverse((o) => {
+    for (const m of [].concat(o.material || [])) {
+      // plain materials keep textures as properties, MToon (VRM) ones in shader uniforms
+      const found = [...Object.values(m), ...Object.values(m.uniforms || {}).map((u) => u?.value)];
+      for (const tex of found) {
+        if (!tex?.isTexture || done.has(tex)) continue;
+        done.add(tex);
+        const img = tex.image, w = img?.width, h = img?.height;
+        if (!w || !h || Math.max(w, h) <= max) continue;
+        const k = max / Math.max(w, h);
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        img.close?.(); // free the full-size bitmap
+        tex.image = c;
+        tex.needsUpdate = true;
+      }
+    }
+  });
+}
 
 function newArmState() {
   return {

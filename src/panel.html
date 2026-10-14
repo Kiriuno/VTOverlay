@@ -51,7 +51,12 @@
   </div>
 
   <h3>Interacting with the avatar</h3>
-  <label class="toggle" title="Pull hair & clothes, headpat and boop (when the broadcaster allows it). Off: clicks always go through to what's behind the avatar."><input type="checkbox" id="interact"> Allow interactions (pull hair, headpat, boop)</label>
+  <label class="toggle" title="Off: clicks always go through to what's behind the avatar"><input type="checkbox" id="interact"> Allow interactions (hair, headpat, boop)</label>
+
+  <h3>Performance</h3>
+  <div class="row" title="Lower = less CPU / GPU"><span>Frame rate</span>
+    <select id="fps" style="margin-left:auto;width:auto"><option value="30">30 fps</option><option value="45">45 fps</option><option value="60">60 fps</option></select></div>
+  <label class="toggle" title="20 fps, lower resolution and smaller textures: much lighter, a little less smooth"><input type="checkbox" id="lowPower"> Low resource mode</label>
 
   <h3>Connection</h3>
   <div class="row">
@@ -60,8 +65,7 @@
     <button id="quit">Quit</button>
   </div>
 
-  <div class="note muted">Closing this window (✕) keeps VTOverlay running in the tray (the ^ next to the clock):
-    click its icon to bring this window back. Only <b>Quit</b> closes the app.</div>
+  <div class="note muted">✕ hides this window to the tray (^ next to the clock); <b>Quit</b> closes the app.</div>
 
 <script>
   const $ = (id) => document.getElementById(id);
@@ -72,6 +76,8 @@
   $('zoneReset').onclick = () => act('zone-reset');
   $('share').onchange = () => act('share', $('share').checked);
   $('interact').onchange = () => act('interact', $('interact').checked);
+  $('lowPower').onchange = () => act('low-power', $('lowPower').checked);
+  $('fps').onchange = () => act('fps', Number($('fps').value));
   $('lock').onclick = () => act('lock-toggle');
   $('resetPos').onclick = () => act('reset-pos');
   $('reconnect').onclick = () => act('reconnect');
@@ -90,6 +96,8 @@
     $('display').value = String(st.displayId);
     $('share').checked = st.sharing;
     $('interact').checked = st.interact;
+    $('lowPower').checked = !!st.lowPower;
+    $('fps').value = String(st.fps || 45); $('fps').disabled = !!st.lowPower;
     $('zone').firstChild.textContent = st.editingZone ? 'Finish zone' : 'Select zone';
     $('lock').firstChild.textContent = st.locked ? 'Move / resize' : 'Lock in place';
   });

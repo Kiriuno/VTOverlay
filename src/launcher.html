@@ -54,14 +54,18 @@
 
   <section class="card" id="sendCard">
     <h2>Broadcast my avatar</h2>
-    <p class="muted">Use your webcam to drive your VRM model and get a room code to share.</p>
+    <p class="muted">Your webcam drives your VRM avatar; share the room code.</p>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
     <button class="primary" id="send">Start broadcasting</button>
+    <button id="sendRoom" title="Friends can join with their own avatar, next to yours">With co-hosts</button>
+    <button id="sendObs" title="Just the camera output for OBS, no viewers (co-hosts optional)">OBS only</button>
+    </div>
   </section>
 
   <section class="card">
     <h2>Show a friend's avatar</h2>
     <p class="muted">Enter the code your friend gave you.</p>
-    <input id="name" type="text" maxlength="24" placeholder="Your name (optional, shown to the broadcaster)" autocomplete="off" spellcheck="false">
+    <input id="name" type="text" maxlength="24" placeholder="Your name (optional)" autocomplete="off" spellcheck="false">
     <input id="code" type="text" maxlength="6" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" style="width:100%">
 
     <div class="label">Show the avatar</div>
@@ -80,6 +84,7 @@
       <div class="muted privacy">You can limit the avatar to part of the screen with <b>Ctrl+Alt+V</b> once it's running.</div>
     </div>
     <button class="primary" id="recv" style="width:100%;margin-top:16px;padding:11px">Join</button>
+    <button id="joinAvatar" style="width:100%;margin-top:8px;padding:9px" title="Stand next to the host with your own avatar (if the host allows co-hosts)">Join with my avatar</button>
     <div id="err"></div>
   </section>
   <footer class="muted"><span id="version"></span> · <a id="checkUpdates">Check for updates</a></footer>
@@ -162,13 +167,15 @@
       });
     }
     else checkUpdates(false, cfg.autoUpdate);
-    if (cfg.receiverOnly) { $('sendCard').hidden = true; $('viewerTag').hidden = false; document.querySelector('.sub').textContent = "See a friend's avatar on your desktop, live."; document.title = 'VTOverlay Viewer'; }
+    if (cfg.receiverOnly) { $('sendCard').hidden = true; $('joinAvatar').hidden = true; $('viewerTag').hidden = false; document.querySelector('.sub').textContent = "See a friend's avatar on your desktop, live."; document.title = 'VTOverlay Viewer'; }
     const saved = store.get('rx-display', null);
     $('display').innerHTML = cfg.displays.map((d) => `<option value="${d.id}">${d.label}</option>`).join('');
     if (saved && cfg.displays.some((d) => d.id === saved)) $('display').value = saved;
   });
 
   $('send').onclick = () => window.vt.startSender();
+  $('sendRoom').onclick = () => window.vt.startSender({ room: true });
+  $('sendObs').onclick = () => window.vt.startSender({ obs: true });
   const join = () => {
     const code = $('code').value.trim().toUpperCase();
     if (!/^[A-Z0-9]{6}$/.test(code)) { $('err').textContent = 'Codes are 6 letters/numbers.'; return; }
@@ -178,6 +185,13 @@
     window.vt.startReceiver(opts);
   };
   $('recv').onclick = join;
+  $('joinAvatar').onclick = () => {
+    const code = $('code').value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(code)) { $('err').textContent = 'Codes are 6 letters/numbers.'; return; }
+    const name = $('name').value.trim();
+    store.set('rx-name', name); store.set('rx-code', code);
+    window.vt.startGuest({ code, name });
+  };
   $('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
 </script>
 </body>

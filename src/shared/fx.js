@@ -149,6 +149,7 @@ export class AvatarFx {
 
   boop() {
     this.boopAt = performance.now();
+    if (this.stage.suspended || this.stars.length > 40) return; // hidden / plenty already: no new stars
     const a = this.areas();
     if (!a) return;
     // a few tiny stars burst out of the nose, each its own way, then drift down and slowly fade
@@ -252,12 +253,17 @@ export class AvatarFx {
   }
 
   _spawnStar(origin, dir, a, i) {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
-      map: this.starTex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false,
-      color: new THREE.Color().setHSL([0.13, 0.14, 0.11, 0.92, 0.55][i % 5], 1, 0.6),
-    }));
-    m.renderOrder = 1001;
-    m.layers.set(3);
+    // stars are recycled (one shared shape, a small pool of meshes): nothing new is made per boop
+    let m = this.starPool?.pop();
+    if (!m) {
+      this.starGeo = this.starGeo || new THREE.PlaneGeometry(1, 1);
+      m = new THREE.Mesh(this.starGeo, new THREE.MeshBasicMaterial({ map: this.starTex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
+      m.renderOrder = 1001;
+      m.layers.set(3);
+    }
+    m.material.color.setHSL([0.13, 0.14, 0.11, 0.92, 0.55][i % 5], 1, 0.6);
+    m.material.opacity = 1;
+    m.rotation.set(0, 0, 0);
     m.position.copy(origin);
     const size = a.nose.r * (0.35 + Math.random() * 0.2); // tiny
     m.scale.set(size, size, 1);
@@ -346,7 +352,7 @@ export class AvatarFx {
       st.m.rotateZ(st.t * st.spin);
       const k = st.t / st.life;
       st.m.material.opacity = k < 0.35 ? 1 : Math.max(0, 1 - (k - 0.35) / 0.65) ** 1.5; // hold, then fade out slowly
-      if (st.t >= st.life) { this.group.remove(st.m); st.m.geometry.dispose(); st.m.material.dispose(); this.stars.splice(i, 1); }
+      if (st.t >= st.life) { this.group.remove(st.m); (this.starPool = this.starPool || []).push(st.m); this.stars.splice(i, 1); }
     }
     this._drawAreas(a, camera);
   }

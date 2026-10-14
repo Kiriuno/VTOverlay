@@ -29,6 +29,8 @@ const DEV = process.argv.includes('--vt-dev');
 const DEV_ROLE = argVal('--vt-dev-role');           // 'broadcast' | 'viewer'
 const DEV_CODE = argVal('--vt-dev-code').toUpperCase();
 const DEV_MODE = argVal('--vt-dev-mode') || 'window';
+const DEV_OBS = process.argv.includes('--vt-dev-obs'); // broadcaster: "OBS only"
+const DEV_COHOSTS = Math.max(0, Math.min(4, Number(argVal('--vt-dev-cohosts')) || 0)); // broadcaster: room for that many co-hosts
 if (DEV) app.setPath('userData', app.getPath('userData') + '-dev-' + (DEV_ROLE || 'app')); // separate settings per instance
 
 /** URL of one of our pages; dev instances tell every page they're in dev mode. */
@@ -79,6 +81,8 @@ function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf
 function writePrefs(patch) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...patch })); } catch {} }
 
 const rx = {
+  lowPower: null, // viewer's "Low resource mode", read from prefs
+  fps: null,      // viewer's frame rate (30 / 45 / 60), read from prefs
   interact: null, // viewer allows interacting with the avatar (pull hair, headpat, boop), read from prefs
   code: '', name: '', mode: 'floating', displayId: null, share: false,
   locked: true, editingZone: false, sharing: false, status: { state: 'warn', text: 'Connecting…' },
@@ -159,7 +163,7 @@ function guardClose(win, hideToTray) {
       try {
         tray.displayBalloon({
           iconType: 'info', title: 'VTOverlay is still running',
-          content: 'Click the VTOverlay icon in the tray (^ next to the clock) to bring it back. Use Quit to close it.',
+          content: 'Click its tray icon (^ next to the clock) to bring it back.',
         });
       } catch {}
     }
@@ -246,12 +250,28 @@ function displayList() {
   }));
 }
 
-ipcMain.handle('start-sender', () => startSenderPage());
-function startSenderPage() {
+ipcMain.handle('start-sender', (_e, o) => startSenderPage(o?.obs ? { obs: '' } : o?.room ? { room: '1' } : {}));
+// joining someone else's room with your own avatar: the same broadcaster page, in co-host mode
+ipcMain.handle('start-guest', (_e, o) => {
+  const code = String(o?.code || '').toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(code)) return;
+  startSenderPage({ join: code, name: String(o?.name || '').slice(0, 24) });
+});
+function startSenderPage(params = {}) {
   if (!mainWin || RECEIVER_ONLY) return;
-  mainWin.setSize(1180, 760);
+  // never taller / wider than the screen space it's on (minus the taskbar), or the bottom of the sidebar
+  // ends up hidden behind the taskbar and looks like it can't scroll all the way
+  const area = screen.getDisplayMatching(mainWin.getBounds()).workArea;
+  mainWin.setSize(Math.min(1180, area.width), Math.min(760, area.height));
   mainWin.center();
-  mainWin.loadURL(pageUrl('sender.html'));
+  const fit = () => {
+    if (!mainWin || mainWin.isDestroyed() || mainWin.isMaximized() || mainWin.isFullScreen()) return;
+    const b = mainWin.getBounds(), wa = screen.getDisplayMatching(b).workArea;
+    const h = Math.min(b.height, wa.height), y = Math.max(wa.y, Math.min(b.y, wa.y + wa.height - h));
+    if (h !== b.height || y !== b.y) mainWin.setBounds({ ...b, y, height: h });
+  };
+  mainWin.removeAllListeners('moved'); mainWin.on('moved', fit);
+  mainWin.loadURL(pageUrl('sender.html', params));
 }
 
 // Global hotkeys for the broadcaster (expressions, props). They work while another app has focus.
@@ -310,10 +330,30 @@ ipcMain.on('mirror-open', (_e, opts = {}) => {
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true);
   win.setIgnoreMouseEvents(true, { forward: true });
-  win.loadURL(pageUrl('overlay.html', { mode: 'screen', mirror: '1', interact: '0', code: '' }));
-  win.on('closed', () => { if (mirrorWin === win) mirrorWin = null; try { mainWin?.webContents.send('mirror-closed'); } catch {} });
+  win.loadURL(pageUrl('overlay.html', { mode: 'screen', mirror: '1', interact: '1', code: '' }));
+  // Windows sometimes drops a window of the same app below another one when you click around: put it
+  // back on top every few seconds (cheap, and only while it's open)
+  const keepOnTop = setInterval(() => { if (!win.isDestroyed()) { win.setAlwaysOnTop(true, 'screen-saver'); win.moveTop(); } }, 2000);
+  win.on('closed', () => { clearInterval(keepOnTop); if (mirrorWin === win) mirrorWin = null; try { mainWin?.webContents.send('mirror-closed'); } catch {} });
 });
 ipcMain.on('mirror-close', () => closeMirror());
+
+// Memory / CPU per part of the app, for the broadcaster's Performance panel
+ipcMain.handle('app-metrics', () => {
+  const names = new Map();
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue;
+    const url = w.webContents.getURL();
+    const name = w === outputWin ? 'Camera output' : w === mirrorWin ? 'Show on my screen'
+      : url.includes('sender.html') ? 'Broadcaster window' : url.includes('overlay.html') ? 'Viewer window' : url.includes('launcher.html') ? 'Start screen' : 'Window';
+    try { names.set(w.webContents.getOSProcessId(), name); } catch {}
+  }
+  return app.getAppMetrics().map((p) => ({
+    name: names.get(p.pid) || ({ Browser: 'Main process', GPU: 'Graphics (GPU process)', Utility: 'Helper (' + (p.name || 'utility') + ')' }[p.type] || p.type),
+    mb: Math.round((p.memory.privateBytes || p.memory.workingSetSize) / 1024),
+    cpu: +p.cpu.percentCPUUsage.toFixed(1),
+  }));
+});
 const isMirror = (e) => !!mirrorWin && !mirrorWin.isDestroyed() && e.sender === mirrorWin.webContents;
 
 // the browser clipboard API is blocked by our permission rules; use Electron's
@@ -343,10 +383,13 @@ function startReceiver(opts) {
 }
 
 function openOverlay() {
+  floatMembers = 1; // a fresh widget starts at the size for one avatar
   rx.editingZone = false;
   rx.sharing = false;
   if (rx.interact === null) rx.interact = readPrefs().interact !== false;
-  const qs = new URLSearchParams({ code: rx.code, mode: rx.mode, name: rx.name, interact: rx.interact ? '1' : '0' });
+  if (rx.lowPower === null) rx.lowPower = readPrefs().lowPower === true;
+  if (rx.fps === null) rx.fps = [30, 45, 60].includes(readPrefs().fps) ? readPrefs().fps : 45;
+  const qs = new URLSearchParams({ code: rx.code, mode: rx.mode, name: rx.name, interact: rx.interact ? '1' : '0', low: rx.lowPower ? '1' : '0', fps: String(rx.fps) });
   let win;
   if (rx.mode === 'window') {
     win = newWindow({ width: 520, height: 720, title: `VTOverlay: ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true }, { hideToTray: true });
@@ -414,7 +457,7 @@ function closePanel() {
 function pushState() {
   const state = {
     code: rx.code, mode: rx.mode, displayId: rx.displayId, displays: displayList(),
-    locked: rx.locked, editingZone: rx.editingZone, sharing: rx.sharing, status: rx.status, interact: rx.interact !== false,
+    locked: rx.locked, editingZone: rx.editingZone, sharing: rx.sharing, status: rx.status, interact: rx.interact !== false, lowPower: !!rx.lowPower, fps: rx.fps,
     alwaysOnTop: !!overlayWin && !overlayWin.isDestroyed() && overlayWin.isAlwaysOnTop(),
   };
   if (panelWin && !panelWin.isDestroyed()) panelWin.webContents.send('rx-state', state);
@@ -437,6 +480,14 @@ async function doAction(action, arg) {
     case 'interact':
       rx.interact = !!arg; writePrefs({ interact: rx.interact });
       overlayWin?.webContents.send('interact-changed', rx.interact);
+      return pushState();
+    case 'low-power':
+      rx.lowPower = !!arg; writePrefs({ lowPower: rx.lowPower });
+      overlayWin?.webContents.send('low-power', rx.lowPower);
+      return pushState();
+    case 'fps':
+      rx.fps = [30, 45, 60].includes(Number(arg)) ? Number(arg) : 45; writePrefs({ fps: rx.fps });
+      overlayWin?.webContents.send('fps', rx.fps);
       return pushState();
     case 'reconnect': return overlayWin?.webContents.send('reconnect');
     case 'disconnect': return disconnectReceiver();
@@ -503,7 +554,7 @@ function setClickThrough(on) {
 // A click-through overlay (full screen, or a locked floating widget) briefly takes the mouse while the
 // cursor is over a part of the avatar that can be grabbed (hair, clothes…), and gives it back after.
 ipcMain.on('overlay-capture-mouse', (_e, on) => {
-  if (isMirror(_e)) return;
+  if (isMirror(_e)) { mirrorWin.setIgnoreMouseEvents(!on, { forward: true }); return; } // click-through except over the avatar's hair, nose…
   if (!overlayWin || overlayWin.isDestroyed()) return;
   const clickThrough = (rx.mode === 'screen' && !rx.editingZone) || (rx.mode === 'floating' && rx.locked);
   if (clickThrough) overlayWin.setIgnoreMouseEvents(!on, { forward: true });
@@ -544,6 +595,18 @@ ipcMain.on('overlay-resize-by', (_e, factor) => {
   const w = Math.max(160, Math.min(2000, Math.round(b.width * factor)));
   const h = Math.max(240, Math.min(3000, Math.round(b.height * factor)));
   overlayWin.setBounds({ x: Math.round(b.x + (b.width - w) / 2), y: b.y + b.height - h, width: w, height: h });
+});
+
+// multi-model rooms: the floating widget gets wider for each extra avatar (they stand in a row)
+let floatMembers = 1;
+ipcMain.on('overlay-members', (e, n) => {
+  n = Math.max(1, Math.min(5, Number(n) || 1));
+  if (!overlayWin || e.sender !== overlayWin.webContents || rx.mode !== 'floating' || n === floatMembers) return;
+  const b = overlayWin.getBounds();
+  const per = (w) => w - b.height * 0.62 * 0.85 * (floatMembers - 1); // width for one avatar
+  const w = Math.round(per(b.width) + b.height * 0.62 * 0.85 * (n - 1));
+  floatMembers = n;
+  overlayWin.setBounds({ x: Math.round(b.x + (b.width - w) / 2), y: b.y, width: w, height: b.height });
 });
 
 ipcMain.on('overlay-set-locked', (_e, locked) => setLocked(!!locked));
@@ -589,7 +652,8 @@ function trayMenu() {
   }
   items.push(
     { type: 'separator' },
-    { type: 'checkbox', label: 'Allow interactions (pull hair, headpat, boop)', checked: rx.interact !== false, click: (mi) => doAction('interact', mi.checked) },
+    { type: 'checkbox', label: 'Allow interactions (hair, headpat, boop)', checked: rx.interact !== false, click: (mi) => doAction('interact', mi.checked) },
+    { type: 'checkbox', label: 'Low resource mode', checked: !!rx.lowPower, click: (mi) => doAction('low-power', mi.checked) },
     { type: 'separator' },
     { label: 'Reconnect', click: () => doAction('reconnect') },
     { label: 'Disconnect (back to menu)', click: () => doAction('disconnect') },
@@ -648,7 +712,9 @@ app.whenReady().then(() => {
   if (DEV) {
     const title = `[DEV ${DEV_ROLE}] `;
     app.on('browser-window-created', (_e, w) => w.on('page-title-updated', (ev, t) => { if (!t.startsWith('[DEV')) { ev.preventDefault(); w.setTitle(title + t); } }));
-    if (DEV_ROLE === 'broadcast' && !RECEIVER_ONLY) setTimeout(() => startSenderPage(), 800);
+    if (DEV_ROLE === 'broadcast' && !RECEIVER_ONLY) setTimeout(() => startSenderPage(DEV_OBS ? { obs: String(DEV_COHOSTS + 1) } : DEV_COHOSTS ? { room: String(DEV_COHOSTS + 1) } : {}), 800);
+    // co-hosts join the dev broadcaster's room with their own avatar (load one the first time; it's remembered)
+    if (/^cohost\d+$/.test(DEV_ROLE) && DEV_CODE && !RECEIVER_ONLY) setTimeout(() => startSenderPage({ join: DEV_CODE, name: 'Dev co-host ' + DEV_ROLE.slice(6) }), 2500);
     if (DEV_ROLE === 'viewer' && DEV_CODE) setTimeout(() => startReceiver({ code: DEV_CODE, mode: DEV_MODE, name: 'Dev viewer', displayId: screen.getPrimaryDisplay().id }), 4000);
   }
   // taskbar moved / resized / auto-hide toggled, resolution changed…

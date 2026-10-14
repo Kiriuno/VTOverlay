@@ -51,8 +51,27 @@ Grab the latest version from **[Releases](https://github.com/Kiriuno/VTOverlay/r
 | **Out of view** | Step out of frame or turn your head far away, and your avatar keeps its last pose (still blinking) until you're back. If tracking drops while you're in front of the camera, or you pause, it relaxes back to rest as before. |
 | **Interactions** | Left-drag hair, a skirt, a ribbon… to pull it (you can do this in your preview too). Viewers can also give **headpats**: rubbing the mouse back and forth over the head, quickly enough and for a moment (just passing over it slowly does nothing), squishes it under a patting hand, faster or slower with their rubbing (from half to two and a half times the normal 2.6 pats per second); overshooting the head a little doesn't stop it, and props don't squish. Clicking the nose is a **boop**: a little scrunch and a few tiny stars. With **Let viewers slap your bottom** on (off by default), a quick swipe of the mouse across the avatar's bottom while it's seen from the side or behind is a **slap** (not a click, so the springs there can still be grabbed): the spring bones there (skirt, tail, long hair…) get knocked the way the mouse was going and swing back and forth for a moment, whole chains at once, and the legs wobble a tiny bit with the feet staying planted. **Spring bones that wiggle on a slap** (under that switch) lets you pick which spring chains react, per avatar (Auto = the ones near the bottom or hanging off the hips), with a button to test it in your preview. Everyone sees all of it. Viewers can pull hair only if you tick **Let viewers grab hair & clothes** (off by default); headpats & boops have their own switch (on by default). The head/nose areas are found automatically; **Adjust headpat, boop & slap areas** fine-tunes them (up/down, forward/back, size). *The headpat hand:* put the classic headpat gif at `assets/headpat.gif` (it isn't included) and it's used automatically, timed to the pats; otherwise a drawn hand is used. |
 | **Camera output** | **Open camera output** opens a clean window with just your avatar on a green (or blue, magenta…) background, 720p / 1080p / square / vertical. In OBS: *Window Capture* of “VTOverlay Output” → *Filters → Chroma Key* → **Start Virtual Camera**, then pick **OBS Virtual Camera** as your camera in Discord, Zoom, Meet… |
+| **Performance** | Memory and CPU of each part of VTOverlay (broadcaster window, graphics, camera output, Show on my screen…), refreshed every few seconds while the panel is open, with how much each one grew since you opened it. |
 | **Viewers** | Each viewer shows what they actually see: *Loading your avatar… 42%*, *● Sees you*, or *Avatar hidden* (full screen, you're not tracking). |
-| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. Their taskbar is shown as a strip; the avatar's feet **snap onto the top of the taskbar**, keep pushing to go over it. **Add image…** (or dropping an image here) puts a picture on their screen: drag it anywhere, scroll to resize; it always faces them and can be in front of or behind the avatar. They can share that screen with you so you see where you're putting things. The **Reset** buttons reset the position, the size, or both. **Show on my screen** (only while the viewer picked here is in Full screen mode) puts your avatar full screen on your own monitor at exactly the same place and size as on the viewer picked here (click-through, like theirs; pick which of your screens if you have several). If that viewer leaves Full screen mode or disconnects, yours closes too. |
+| **Place on viewer's screen** | For friends in Full screen mode: drag your avatar around their monitor and resize it. Their taskbar is shown as a strip; the avatar's feet **snap onto the top of the taskbar**, keep pushing to go over it. **Add image…** (or dropping an image here) puts a picture on their screen: drag it anywhere, scroll to resize; it always faces them and can be in front of or behind the avatar. They can share that screen with you so you see where you're putting things. The **Reset** buttons reset the position, the size, or both. **Show on my screen** (only while the viewer picked here is in Full screen mode) puts your avatar full screen on your own monitor at exactly the same place and size as on the viewer picked here (click-through, like theirs; pick which of your screens if you have several). If that viewer leaves Full screen mode or disconnects, yours closes too. It stays on top of your other windows, and you can pat, boop, slap and pull hair on it like a viewer (with the same permission switches). |
+
+### OBS only
+
+**OBS only** on the start screen is for when you only want your avatar in OBS (or a virtual camera for Discord, Zoom…), with no viewers. The camera output opens by itself, and there's no viewer list and no placing on someone's screen. With **Avatars in the room** on **Just me**, nothing leaves your computer (no room code). Pick 2 to 5 and you get a room code so friends can **Join with my avatar** as co-hosts: they appear next to you in the camera output. Viewers who try that code are told you're only using OBS.
+
+### Several avatars in one room
+
+Up to 5 people can stand in the same room, each with their own avatar.
+
+- **The host** presses **With co-hosts** on the start screen (instead of Start broadcasting; **OBS only** can take co-hosts too) and sets **Avatars in the room** (2 to 5) next to the room code. A normal broadcast doesn't take co-hosts.
+- **Joining with your avatar**: on the start screen, type the host's code and press **Join with my avatar** (instead of Join). You get the broadcaster window as usual: load your avatar, track, set your expressions, props and interaction switches. Your avatar appears next to the host's, for everyone.
+- **One row**: everyone stands side by side. **Move left / Move right** (Avatar section) swaps places with your neighbour; the buttons grey out at the ends of the row. Your preview keeps you in the middle with the others beside you; **Hide the others in my preview** hides them there only (nobody else is affected). Viewers, floating widgets (they widen to fit everyone) and the camera output show the whole group, centred.
+- **Your own view**: in **My avatar**, zooming, moving and turning only change your own avatar (everyone sees it that way). The host decides the framing (bust or full body) and the **roll**, which turns the whole row around its middle (at 90° the row becomes a column), plus the lighting, who watches and who stays. The host can remove a co-host (✕ in the Viewers section).
+- **Who's in front**: the avatar that looks bigger on screen (taller model, or zoomed in more by its owner) stands further back, the smaller one in front. Zoom a small avatar until it's the bigger one and it goes behind. Two exactly the same size share one layer (each avatar is drawn as its own picture, so where they cross one is simply drawn over the other; they can't pass through each other in 3D).
+- **Same floor**: in a room everyone is framed from the same height, so feet line up: a kneeling or sitting avatar is lower than a standing one, and a small avatar is smaller than a tall one.
+- **Full-screen viewers**: by default the row is placed as a whole (the host drags it in **Place on viewer's screen**). With **Co-hosts place their own avatar** on, each co-host moves and resizes their own avatar on full-screen viewers (the host can't move theirs then, only their own).
+- **Interactions**: viewers can pat, boop, slap and grab every avatar; each owner's own switches decide what's allowed on their avatar. Everyone keeps their own props.
+- Viewers need this version (0.9.0) or newer to see the co-hosts; older ones only see the host.
 
 ## Watching (your friend)
 
@@ -67,6 +86,8 @@ The **control window** (floating and full screen modes) has every action:
 - edit the zone
 - share the screen with the broadcaster (off by default)
 - reconnect, disconnect, quit
+
+**Frame rate** (control window): how often the avatar is drawn, 30, 45 (default) or 60 times a second. More is smoother, less is lighter on the CPU and GPU. **Low resource mode** (control window or tray menu) overrides it: 20 times a second, a lower resolution and smaller textures (capped at 1024 px, which also saves graphics memory). Both are remembered for next time.
 
 **Allow interactions** (control window or tray menu) switches pulling, headpats and boops off on your side, so clicks always reach whatever is behind the avatar.
 
@@ -96,30 +117,14 @@ Requires [Node.js](https://nodejs.org) 20+.
 ```bash
 npm install
 npm run dev              # a broadcaster + a viewer, already linked (dev rooms only, see below)
+npm run dev -- --cohosts=2  # + 2 co-hosts joining with their own avatar
 npm start                # run from source (broadcast + view)
 npm run start-viewer     # run as the viewer-only app
 npm run package-all      # build dist/VTOverlay-win32-x64 and dist/VTOverlay-Viewer-win32-x64
 npm run release-zips     # same, plus the two zips a GitHub release needs
 ```
 
-`npm run dev` starts both apps from your source folder with a fresh room code and joins the viewer to it. Dev apps use their own rooms (a different room-name prefix), so a dev broadcaster and a released viewer can never see each other, and the other way round. They also keep their own settings. Options: `npm run dev -- --mode=floating` (or `screen`), `--code=ABC123`, `--only=viewer`. The viewer's connection status is printed in the terminal.
-
-## Publishing a release (maintainer)
-
-Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a version tag is pushed:
-
-```bash
-# 1. set the version (three numbers) in package.json + package-lock.json:
-npm version 0.8.1 --no-git-tag-version
-# 2. commit EVERYTHING (git add -A also picks up new files; commit -am does not):
-git add -A
-git commit -m "v0.8.1"
-git tag v0.8.1
-git push
-git push origin v0.8.1
-```
-
-About 5 minutes later the release appears with both zips attached, and every installed copy offers the update. The workflow refuses to publish if the tag and `package.json` disagree. The repo must be **public**, because the apps read the latest release without logging in.
+`npm run dev` starts both apps from your source folder with a fresh room code and joins the viewer to it. Dev apps use their own rooms (a different room-name prefix), so a dev broadcaster and a released viewer can never see each other, and the other way round. They also keep their own settings. Options: `npm run dev -- --mode=floating` (or `screen`), `--code=ABC123`, `--only=viewer`, `--cohosts=2` (1 to 4 co-hosts that join the dev broadcaster's room with their own avatar; the broadcaster starts with co-hosts enabled; each co-host keeps its own settings, so load a model in each one once and it's remembered), `--viewers=0` (no viewer), `--obs` (the broadcaster starts **OBS only**, no viewer; with `--cohosts=N` it opens a room for them). The viewer's connection status is printed in the terminal.
 
 ## How it works
 
@@ -152,10 +157,11 @@ About 5 minutes later the release appears with both zips attached, and every ins
   - `arms.js`: arm / hand tracking and its filtering
   - `grab.js`: pulling hair & clothes
   - `fx.js`: headpats & boops
-- `src/output.*`: camera output window (OBS)
-- `scripts/dev.js`: `npm run dev`
+  - `room.js`: multi-avatar rooms (co-hosts)
   - `filters.js`
   - `protocol.js`: the message format, documented
+- `src/output.*`: camera output window (OBS)
+- `scripts/dev.js`: `npm run dev`
 
 ### Advanced
 

@@ -26,7 +26,7 @@
   body.camHidden #trackState { bottom: 16px; }
   #trackState { position: absolute; left: 16px; bottom: 176px; font-size: 12px; background: #0008; padding: 4px 8px; border-radius: 6px; }
   /* plain block layout (not flex): opening / closing sections then always updates how far it scrolls */
-  aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; overflow-anchor: none; padding: 18px; display: block; min-height: 0; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; overflow-anchor: none; overscroll-behavior: none; padding: 18px 18px 40px; display: block; min-height: 0; }
   aside > * { display: block; flex-shrink: 0; }
   aside > * + * { margin-top: 10px; }
   .sec h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
@@ -77,6 +77,35 @@
   #viewers .vsee { font-size: 11px; }
   #viewers .vsee.ok { color: var(--ok); } #viewers .vsee.warn { color: var(--warn); } #viewers .vsee.bad { color: var(--bad); } #viewers .vsee.muted { color: var(--muted); }
   #viewers .vrow button { padding: 1px 8px; font-size: 12px; }
+  /* the other avatars of a room, beside yours in the preview (drawn only, your mouse goes to yours) */
+  /* the avatars (yours and the others) are layered below everything else in the preview: bigger ones further
+     back (z-index set from the script, all negative inside this isolated area) */
+  #stageWrap { isolation: isolate; }
+  #neighbors { position: absolute; inset: 0; pointer-events: none; }
+  #neighbors .member { position: absolute; inset: 0; }
+  #neighbors .memberCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  body.placing #neighbors { display: none; }
+  #zoneBox .mbox { position: absolute; border: 2px dashed #ffffff66; background: #ffffff10; border-radius: 6px; pointer-events: auto; touch-action: none;
+                   display: flex; align-items: flex-end; justify-content: center; cursor: default; }
+  #zoneBox .mbox .name { position: absolute; top: -22px; left: 50%; transform: translateX(-50%); font-size: 11px; white-space: nowrap;
+                         background: #ffffff30; color: #fff; padding: 1px 6px; border-radius: 4px; }
+  #zoneBox .mbox svg { width: 70%; height: 80%; opacity: .25; pointer-events: none; }
+  #avBox.locked { cursor: not-allowed; }
+  #rowPlace .row button { flex: 1; }
+  #cohosts h4 { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  #cohosts { margin-bottom: 10px; }
+  #cohosts .vrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  #cohosts .vrow button { padding: 1px 8px; font-size: 12px; }
+  /* joined someone else's room with your avatar: their room, their rules */
+  body:not(.roomMode) #roomModelsRow, body:not(.roomMode) #freeRow { display: none !important; }
+  /* OBS only: no viewers (no placing on their screen, no viewer list); no code while nobody can join */
+  body.obsOnly #tabs, body.obsOnly #maxViewersRow, body.obsOnly #freeRow, body.obsOnly #viewers, body.obsOnly #viewerCount,
+  body.obsOnly #newCode, body.obsOnly.offline .codeRow, body.obsOnly.offline details[data-sec="viewers"] { display: none !important; }
+  body.guest #newCode, body.guest #maxViewersRow, body.guest #roomModelsRow, body.guest #freeRow, body.guest #hideCode,
+  body.guest #frBtn, body.guest #viewTools .sep, body.guest details[data-sec="view"], body.guest #lightSec,
+  body.guest #mirrorBtn, body.guest #mirrorDisplay, body.guest #viewers .vrow button, body.guest #placeAdd { display: none !important; }
+  #guestNote { display: none; }
+  body.guest #guestNote { display: block; }
   #viewTools { position: absolute; top: 14px; right: 14px; left: 290px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; z-index: 3; pointer-events: none; }
   #viewTools .btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; pointer-events: auto; }
   #viewTools button { padding: 6px 10px; font-size: 13px; background: #0008; white-space: nowrap; }
@@ -162,25 +191,26 @@
 <body>
   <div id="stageWrap">
     <canvas id="stage"></canvas>
+    <div id="neighbors"></div>
     <div id="empty"><div><p style="font-size:16px;margin:0 0 6px">No avatar loaded</p>
-      <p class="muted" style="margin:0">Load a <b>.vrm</b> file on the right. You can make one for free in VRoid Studio or download one from VRoid Hub.</p></div></div>
+      <p class="muted" style="margin:0">Load a <b>.vrm</b> on the right (free ones: VRoid Studio, VRoid Hub).</p></div></div>
     <div id="trackState"><span class="dot" id="trackDot"></span><span id="trackText">Starting camera…</span></div>
     <video id="cam" playsinline muted></video>
-    <div id="guide"><span>what viewers see (widget / full screen)</span></div>
+    <div id="guide"><span>what viewers see</span></div>
     <div id="viewTools">
       <div class="btns"><button id="frBtn">Bust</button><span class="sep"></span><span class="lbl">Reset</span><button data-reset="pos">Position</button><button data-reset="size">Size</button><button data-reset="rot">Rotation</button><button data-reset="all">All</button></div>
-      <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: turn (Shift: roll) · Left-drag hair / clothes: pull<br>Viewers see exactly this framing</div>
+      <div id="viewHint" class="muted">Scroll: zoom · Middle-drag: move · Right-drag: turn (Shift: roll) · Left-drag: pull hair</div>
     </div>
-    <div id="pausedBanner" hidden><b>⏸︎ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · viewers see your avatar idling<br>(full-screen viewers hide it after 30 s)</div></div>
+    <div id="pausedBanner" hidden><b>⏸︎ Tracking paused</b><div class="muted" style="margin-top:4px;font-size:12px">Camera off · your avatar idles<br>(hidden on full screen after 30 s)</div></div>
     <div id="tabs"><button data-tab="avatar" class="on">My avatar</button><button data-tab="place">Place on viewer's screen</button></div>
     <div id="placeView" hidden>
       <div id="placeBar">
         <select id="viewerSel"></select>
         <span class="lbl muted">Reset</span><span id="resetPosBtns"><button data-reset="pos">Position</button> <button data-reset="size">Size</button> <button data-reset="all">All</button></span>
-        <button id="mirrorBtn" hidden title="Shows your avatar full screen on your own monitor, at the same place and size as on the viewer selected here (click-through, like theirs). Only for a viewer in Full screen mode.">Show on my screen</button><select id="mirrorDisplay" hidden title="Which of your screens"></select>
-        <button id="placeAdd" title="Add an image to their screen (you can also drop images here)">Add image…</button><input type="file" id="placeFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <button id="mirrorBtn" hidden title="Your avatar on your own screen, exactly as on this viewer's">Show on my screen</button><select id="mirrorDisplay" hidden title="Which of your screens"></select>
+        <button id="placeAdd" title="Put an image on their screen (or drop one here)">Add image…</button><input type="file" id="placeFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
 
-        <span class="muted hint">Drag the avatar or an image to move it (the avatar's feet snap onto the taskbar; keep pushing to go over it) · scroll to resize</span>
+        <span class="muted hint">Drag to move (feet snap to the taskbar) · scroll to resize</span>
       </div>
       <div id="screenArea">
         <div id="screenBox">
@@ -199,13 +229,17 @@
 
   <aside>
     <div class="sec">
-      <h3>Room code</h3>
+      <h3 id="roomSecTitle">Room code</h3>
       <div class="codeRow"><span id="code">······</span><span class="row" style="flex-wrap:nowrap;gap:6px"><button id="hideCode" class="mini"></button><button id="copy">Copy</button></span></div>
       <div class="muted" style="margin-top:6px"><span class="dot" id="netDot"></span><span id="netText">Connecting to the connection server…</span></div>
       <div class="row" style="margin-top:10px"><button id="stop">Stop broadcasting</button><button id="newCode">New code</button></div>
-      <div class="slider" style="margin-top:8px" title="Extra people who try to join get “room is full” and are let in when a spot frees up"><span>Max viewers</span>
+      <div id="guestNote" class="hint muted" style="margin-top:8px">You're a co-host: the host picks the framing, roll and lighting. Zoom, move and turn only change your avatar.</div>
+      <div class="slider" id="roomModelsRow" style="margin-top:8px" title="Friends use Join with my avatar and stand next to you"><span>Avatars in the room</span>
+        <select id="roomModels"><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></div>
+      <label class="toggle" id="freeRow" title="On full-screen viewers, each co-host places their own avatar. Off: they stand in the row next to you.">Co-hosts place their own avatar <input type="checkbox" id="freePlace"></label>
+      <div class="slider" id="maxViewersRow" style="margin-top:8px" title="Extra viewers wait until a spot frees up"><span>Max viewers</span>
         <select id="maxViewers"><option value="0">No limit</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="8">8</option><option value="10">10</option><option value="15">15</option><option value="20">20</option></select></div>
-      <div id="updatePill" hidden>⬆ <b id="updateVer"></b> is available: <a id="updateGo">go to the start screen to update</a></div>
+      <div id="updatePill" hidden>⬆ <b id="updateVer"></b> is out: <a id="updateGo">update from the start screen</a></div>
     </div>
 
     <details class="sec" data-sec="avatar" open><summary><h3>Avatar</h3></summary>
@@ -217,17 +251,22 @@
         <button class="primary" id="load">Load .vrm…</button>
         <input type="file" id="file" accept=".vrm" hidden>
       </div>
-      <div class="row" style="margin-top:8px" title="Your body pose. Head, face and arm tracking still work on top of it."><span style="flex:none">Pose</span><select id="poseSel" style="flex:1"></select></div>
-      <div class="hint muted" style="margin-top:6px">Your webcam image never leaves this computer. Viewers only receive head/face movement numbers. The model is sent to viewers automatically, they don't need the file.</div>
+      <div id="rowPlace" hidden style="margin-top:8px">
+        <div class="hint muted" id="rowPlaceText"></div>
+        <div class="row" style="margin-top:4px"><button id="moveLeft" title="Swap places with the avatar on your left">Move left</button><button id="moveRight" title="Swap places with the avatar on your right">Move right</button></div>
+        <label class="toggle" title="Only here: everyone else still sees them">Hide the others in my preview <input type="checkbox" id="hideOthers"></label>
+      </div>
+      <div class="row" style="margin-top:8px" title="Tracking still works on top of it"><span style="flex:none">Pose</span><select id="poseSel" style="flex:1"></select></div>
+      <div class="hint muted" style="margin-top:6px">Your webcam image stays on this computer: only your movements and model are sent.</div>
     </details>
 
     <details class="sec" data-sec="tracking" open><summary><h3>Tracking</h3></summary>
       <div class="row" style="margin-bottom:8px"><button id="pauseBtn" style="flex:1">⏸︎ Pause tracking</button><button id="pauseHk" class="hk" title="Set a hotkey for pause / resume">⌨︎</button></div>
       <select id="camSel"></select>
-      <div class="row" style="margin-top:8px"><button id="calib">Calibrate (look straight, relaxed face)</button></div>
+      <div class="row" style="margin-top:8px"><button id="calib">Calibrate (look straight, relax)</button></div>
       <label class="toggle">Hide webcam preview <input type="checkbox" id="hideCam"></label>
       <label class="toggle">Auto expressions from your face <input type="checkbox" id="autoExpr"></label>
-      <label class="toggle" title="Your microphone opens the avatar's mouth while you talk (on top of face tracking, handy when the camera misses your mouth)">Move mouth with my voice <input type="checkbox" id="voiceMouth"></label>
+      <label class="toggle" title="Your mic opens the mouth while you talk, on top of face tracking">Move mouth with my voice <input type="checkbox" id="voiceMouth"></label>
       <div id="voiceRow" hidden>
         <select id="micSel"></select>
         <div class="slider" title="Higher = the mouth opens more for quiet speech"><span>Voice sensitivity <span class="vmeter"><i id="voiceMeter"></i></span></span><input type="range" id="voiceGain" min="0.3" max="3" step="0.05"></div>
@@ -239,17 +278,17 @@
       <label class="toggle">Swap left/right eyes &amp; mouth <input type="checkbox" id="swapLR" checked></label>
       <label class="toggle">Link both eyes (no winks) <input type="checkbox" id="linkEyes"></label>
       <div class="slider"><span>Smoothing</span><input type="range" id="smoothing" min="0" max="1" step="0.05" value="0.5"></div>
-      <div class="hint muted">Wink test: close your <b>right</b> eye. With Mirror on, the eye on the <b>right side</b> of the preview should close (off: the left side). If the other one closes, flip “Swap left/right”.</div>
+      <div class="hint muted">Wink test: close your <b>right</b> eye. With Mirror on, the right-side eye in the preview should close; if not, flip “Swap left/right”.</div>
     </details>
 
     <details class="sec" data-sec="sens"><summary><h3>Sensitivity</h3></summary>
-      <div class="hint muted" style="margin:-2px 0 6px" id="sensFor">Saved separately for each avatar.</div>
+      <div class="hint muted" style="margin:-2px 0 6px" id="sensFor">Saved per avatar.</div>
       <h4>Face</h4>
       <div class="slider dual head"><span></span><small>sensitivity</small><small>limit</small></div>
       <div class="slider dual"><span>Mouth <output id="mouthMaxOut"></output></span><input type="range" id="mouthGain" min="0.5" max="3" step="0.05" value="1.6" title="Sensitivity"><input type="range" id="mouthMax" min="0" max="1" step="0.02" value="1" title="Limit: the mouth never opens past this"></div>
       <div class="slider dual"><span>Blink <output id="blinkMaxOut"></output></span><input type="range" id="blinkGain" min="0.5" max="3" step="0.05" value="1.5" title="Sensitivity"><input type="range" id="blinkMax" min="0" max="1" step="0.02" value="1" title="Limit: the eyes never close past this"></div>
       <details id="vowels"><summary>Mouth shapes (A, E, I, O, U)</summary>
-        <div class="hint muted" style="margin:4px 0 2px">On top of the mouth sensitivity. Lower one if your avatar over-does that vowel, raise it if it barely shows.</div>
+        <div class="hint muted" style="margin:4px 0 2px">Lower a vowel your avatar over-does, raise one that barely shows.</div>
         <div id="vowelSliders"></div>
         <button id="vowelReset" style="padding:4px 10px;font-size:12px;margin-top:4px">Reset</button>
       </details>
@@ -257,14 +296,14 @@
       <div class="slider" title="How much the body follows your head going up and down (0 = not at all)"><span>Up / down</span><input type="range" id="bodyY" min="0" max="3" step="0.05" value="1"></div>
       <div class="slider" title="How much the body follows your head going left and right"><span>Left / right</span><input type="range" id="bodyX" min="0" max="3" step="0.05" value="1"></div>
       <div class="slider" title="How much the body follows your head going toward / away from the camera"><span>Forward / back</span><input type="range" id="bodyZ" min="0" max="2" step="0.05" value="0.5"></div>
-      <div class="hint muted">Per-expression mouth / blink tuning is in <b>Expressions</b> (turn an expression on).</div>
+      <div class="hint muted">Mouth and blinking per expression: turn one on in <b>Expressions</b>.</div>
     </details>
 
     <details class="sec" data-sec="expr" open><summary><h3>Expressions</h3></summary>
-      <div class="hint muted" style="margin:-2px 0 8px">Click to toggle · <b>right-click</b> one to give it a hotkey (works from any app)</div>
+      <div class="hint muted" style="margin:-2px 0 8px">Click to toggle · <b>right-click</b> for a hotkey</div>
       <div class="row" id="xrow"></div>
       <details id="autoTune" style="margin-top:8px"><summary>Auto expressions: sensitivity</summary>
-        <div class="hint muted" style="margin:4px 0">Needs <b>Auto expressions from your face</b> (Tracking). The bars show what's read from your face right now; the strongest one past the mark shows on your avatar. Raise one that never triggers, lower one that triggers too easily. Calibrating with a relaxed face helps a lot. If one never goes all the way, <b>Calibrate</b> it: make that face the way you normally would, click, hold it for 2 seconds; that becomes its full strength.</div>
+        <div class="hint muted" style="margin:4px 0">Needs <b>Auto expressions</b> (Tracking). The strongest bar past its mark shows. Raise one that never triggers, lower one that triggers too easily. One that never goes all the way: make that face, click <b>Calibrate</b>, hold 2 seconds.</div>
         <div id="autoRows"></div>
         <button class="mini" id="autoReset" style="margin-top:4px">Reset</button>
       </details>
@@ -279,15 +318,14 @@
     <details class="sec" data-sec="view"><summary><h3>View</h3></summary>
       <div class="slider" title="Turns the whole picture: sideways, upside down…"><span>Roll <output id="rollOut"></output></span><input type="range" id="roll" min="-180" max="180" step="1"></div>
       <div class="row"><button class="mini" data-roll="0">Upright</button><button class="mini" data-roll="90">↺ 90°</button><button class="mini" data-roll="-90">↻ 90°</button><button class="mini" data-roll="180">Upside down</button></div>
-      <div class="hint muted" style="margin-top:6px">In the preview: scroll = zoom · middle-drag = move · right-drag = turn · <b>Shift+right-drag</b> = roll.</div>
     </details>
 
     <details class="sec" data-sec="output"><summary><h3>Camera output (OBS / Discord)</h3></summary>
-      <div class="hint muted" style="margin:-2px 0 8px">A clean window with just your avatar on a solid colour, to use as a camera.</div>
+      <div class="hint muted" style="margin:-2px 0 8px">Just your avatar on a solid colour, to use as a camera.</div>
       <div class="slider"><span>Background</span><select id="outputBg"><option value="#00b140">Green screen</option><option value="#0047bb">Blue screen</option><option value="#ff00ff">Magenta</option><option value="#000000">Black</option><option value="#ffffff">White</option></select></div>
       <div class="slider"><span>Size</span><select id="outputSize"><option value="1280x720">1280 × 720</option><option value="1920x1080">1920 × 1080</option><option value="720x720">720 × 720 (square)</option><option value="720x1280">720 × 1280 (vertical)</option></select></div>
       <button id="outputBtn" style="width:100%;margin-top:6px">Open camera output</button>
-      <div class="hint muted" style="margin-top:8px">In OBS: <b>+ → Window Capture</b> → “[VTOverlay Output]” → right-click it → <b>Filters → + Chroma Key</b> (same colour) → <b>Start Virtual Camera</b>. In Discord (or Zoom, Meet…) pick <b>OBS Virtual Camera</b> as your camera.</div>
+      <div class="hint muted" style="margin-top:8px">OBS: <b>+ → Window Capture</b> → “[VTOverlay Output]”, then right-click → <b>Filters → + Chroma Key</b> (same colour). For Discord, Zoom…: <b>Start Virtual Camera</b> and pick <b>OBS Virtual Camera</b> there.</div>
     </details>
 
     <details class="sec" data-sec="light" id="lightSec"><summary><h3>Lighting</h3></summary>
@@ -297,8 +335,8 @@
       <div class="slider"><span>Brightness</span><input type="range" id="lightI" min="0" max="3" step="0.05"></div>
       <div class="slider" title="Where the light comes from, as seen in the preview"><span>From left ↔ right</span><input type="range" id="lightX" min="-1" max="1" step="0.02"></div>
       <div class="slider"><span>From below ↔ above</span><input type="range" id="lightY" min="-1" max="1" step="0.02"></div>
-      <div class="slider" title="Left: from behind the avatar (rim light) · right: from the front (the camera's side)"><span>From behind ↔ front</span><input type="range" id="lightZ" min="-1" max="1" step="0.02"></div>
-      <div class="slider" title="Soft light that reaches everywhere (fills the shadows)"><span>Fill light</span><input type="range" id="lightAmb" min="0" max="2" step="0.05"></div>
+      <div class="slider" title="Left: behind (rim light) · right: front"><span>From behind ↔ front</span><input type="range" id="lightZ" min="-1" max="1" step="0.02"></div>
+      <div class="slider" title="Soft light that fills the shadows"><span>Fill light</span><input type="range" id="lightAmb" min="0" max="2" step="0.05"></div>
       <div class="slider"><span>Fill colour</span><span class="colorRow"><input type="color" id="lightAmbColor"><span id="lightAmbColorHex" class="muted"></span></span></div>
       <div class="row" style="margin-top:4px"><button class="mini" id="lightReset">Reset lighting</button>
         <span class="hint muted" id="lightDesc"></span></div>
@@ -308,24 +346,24 @@
       <div class="row" style="margin-bottom:8px"><button id="addProp">Add image…</button><button id="lockAll" title="Stop props from being grabbed, resized or rotated in the preview"></button><input type="file" id="propFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
       <div id="propList"></div>
       <datalist id="groupList"></datalist>
-      <div id="propGroups" hidden><div class="hint muted" style="margin:10px 0 4px">Groups: one hotkey shows / hides the whole group</div><div class="list"></div></div>
-      <div id="propDrop" class="muted">PNG, JPG, GIF or WebP (animated works). Drop images here or anywhere on the window.<br>
-        In the preview: <b>drag</b> a prop to move it · <b>scroll</b> on it to resize · <b>Shift+scroll</b> to rotate.</div>
+      <div id="propGroups" hidden><div class="hint muted" style="margin:10px 0 4px">Groups: one hotkey shows / hides them all</div><div class="list"></div></div>
+      <div id="propDrop" class="muted">PNG, JPG, GIF or WebP (animated too), or drop them anywhere.<br>
+        Preview: <b>drag</b> to move · <b>scroll</b> to resize · <b>Shift+scroll</b> to rotate.</div>
     </details>
 
     <details class="sec" data-sec="interact"><summary><h3>Interactions</h3></summary>
-      <label class="toggle" title="Viewers can pull your avatar's hair, clothes, ribbons… with their mouse. Everyone sees it.">Let viewers grab hair &amp; clothes <input type="checkbox" id="viewerGrab"></label>
-      <label class="toggle" title="Rubbing the mouse over the head = headpat (squish + patting hand). Clicking the nose = boop (tiny stars).">Let viewers headpat &amp; boop <input type="checkbox" id="viewerPat"></label>
-      <label class="toggle" title="A quick swipe of the mouse across your avatar's bottom (seen from the side or behind) = a slap: skirt, tail… wiggle, the legs wobble a little. Clicking there still grabs the springs.">Let viewers slap your bottom <input type="checkbox" id="viewerSlap"></label>
+      <label class="toggle" title="Viewers pull hair, clothes, ribbons… with the mouse">Let viewers grab hair &amp; clothes <input type="checkbox" id="viewerGrab"></label>
+      <label class="toggle" title="Rub the head: headpat · click the nose: boop">Let viewers headpat &amp; boop <input type="checkbox" id="viewerPat"></label>
+      <label class="toggle" title="A quick mouse swipe across the bottom (side or back view) makes skirt, tail… wiggle">Let viewers slap your bottom <input type="checkbox" id="viewerSlap"></label>
       <details id="slapPick"><summary>Spring bones that wiggle on a slap</summary>
-        <div class="hint muted" style="margin:4px 0">Saved for each avatar. <b>Auto</b> picks the ones near the bottom or hanging off the hips; untick it to choose them yourself (the number is how many bones are in that chain).</div>
+        <div class="hint muted" style="margin:4px 0">Saved per avatar. <b>Auto</b> picks the ones near the hips; untick it to choose (number = bones in the chain).</div>
         <label class="toggle">Auto <input type="checkbox" id="slapAuto" checked></label>
         <div id="slapBones" style="max-height:220px;overflow:auto"></div>
         <button class="mini" id="slapTest" style="margin-top:6px">Test slap in my preview</button>
       </details>
-      <div class="hint muted" style="margin:2px 0 6px">You can pull hair in your preview too (headpats and boops are for viewers). Viewers can switch interactions off on their side.</div>
+      <div class="hint muted" style="margin:2px 0 6px">You can pull hair in your preview too.</div>
       <details id="fxAreas"><summary>Adjust headpat, boop &amp; slap areas</summary>
-        <div class="hint muted" style="margin:4px 0">The areas are found from your model's head and eyes; nudge them if they're off. They're outlined in the preview while this is open.</div>
+        <div class="hint muted" style="margin:4px 0">Found automatically; nudge them if they're off (outlined in the preview while open).</div>
         <div class="slider"><span>Head area ↕</span><input type="range" id="fxHy" min="-0.3" max="0.3" step="0.005"></div>
         <div class="slider"><span>Head area forward ↔ back</span><input type="range" id="fxHz" min="-0.3" max="0.3" step="0.005"></div>
         <div class="slider"><span>Head area size</span><input type="range" id="fxHs" min="0.3" max="3" step="0.05"></div>
@@ -339,14 +377,20 @@
       </details>
     </details>
 
-    <details class="sec" data-sec="viewers" open><summary><h3>Viewers <span id="viewerCount" style="text-transform:none;letter-spacing:0"></span></h3></summary>
+    <details class="sec" data-sec="perf"><summary><h3>Performance</h3></summary>
+      <div class="hint muted" style="margin:-2px 0 6px">Memory and CPU of each part, refreshed while this is open.</div>
+      <div id="perfRows" class="muted" style="font-size:12px"></div>
+    </details>
+
+    <details class="sec" data-sec="viewers" open><summary><h3><span id="viewersSecTitle">Viewers</span> <span id="viewerCount" style="text-transform:none;letter-spacing:0"></span></h3></summary>
+      <div id="cohosts" hidden></div>
       <div id="viewers" class="muted">Nobody yet. Share the code.</div>
     </details>
   </aside>
 
 <div id="hkModal" hidden><div>
   <h4 id="hkTitle">Hotkey</h4>
-  <div class="muted" style="font-size:12px">Press the key combination (for example Alt+H, Ctrl+Alt+1, F9, Ctrl+Shift+Numpad 3)</div>
+  <div class="muted" style="font-size:12px">Press the keys (e.g. Alt+H, Ctrl+Alt+1, F9)</div>
   <div id="hkCombo">…</div>
   <div id="hkMsg" class="muted"></div>
   <div class="row" style="justify-content:center;margin-top:10px"><button id="hkClear">Remove hotkey</button><button id="hkCancel">Cancel (Esc)</button></div>
