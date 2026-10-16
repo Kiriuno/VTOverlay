@@ -22,7 +22,7 @@
 </style>
 </head>
 <body>
-  <h1>Watching room <span id="code">······</span></h1>
+  <h1 style="display:flex;align-items:center;gap:8px">Watching room <span id="code">······</span><button id="hideCode" class="mini" style="margin-left:auto;font-size:11px;padding:2px 8px">Hide</button></h1>
   <div class="status muted"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></div>
 
   <h3>Show the avatar as</h3>
@@ -84,8 +84,18 @@
   $('disconnect').onclick = () => act('disconnect');
   $('quit').onclick = () => act('quit');
 
+  // the room code can be hidden (e.g. while streaming your screen); remembered
+  let codeHidden = false, lastCode = '';
+  try { codeHidden = localStorage.getItem('vt-hide-code') === '1'; } catch {}
+  const showCode = () => {
+    $('code').textContent = codeHidden ? '······' : lastCode;
+    $('hideCode').textContent = codeHidden ? 'Show' : 'Hide';
+    $('hideCode').title = codeHidden ? 'Show the room code' : 'Hide the room code';
+  };
+  $('hideCode').onclick = () => { codeHidden = !codeHidden; try { localStorage.setItem('vt-hide-code', codeHidden ? '1' : '0'); } catch {} showCode(); };
+  showCode();
   window.vt.onRxState((st) => {
-    $('code').textContent = st.code;
+    lastCode = st.code || ''; showCode();
     $('dot').className = 'dot ' + (st.status?.state || '');
     $('statusText').textContent = st.status?.text || '';
     document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('cur', b.dataset.mode === st.mode));

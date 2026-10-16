@@ -331,10 +331,14 @@ async function showPerf() {
     return `<div class="row" style="justify-content:space-between;gap:8px"><span>${name}</span><span>${o.mb} MB · ${o.cpu.toFixed(1)}% CPU${trend}</span></div>`;
   });
   const total = [...by.values()].reduce((a, o) => a + o.mb, 0);
-  $('perfRows').innerHTML = rows.join('') + `<div class="row" style="justify-content:space-between;margin-top:4px"><b>Total</b><b>${total} MB</b></div>`;
+  // what this window holds for drawing (if these keep climbing, something isn't being freed)
+  const ri = stage.renderer.info, heap = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+  const detail = `<div class="hint" style="margin-top:6px">Preview: ${ri.memory.textures} textures, ${ri.memory.geometries} meshes${heap != null ? `, ${heap} MB of scripts` : ''}</div>`;
+  $('perfRows').innerHTML = rows.join('') + `<div class="row" style="justify-content:space-between;margin-top:4px"><b>Total</b><b>${total} MB</b></div>` + detail;
 }
 setInterval(showPerf, 4000);
-document.querySelector('[data-sec=perf]').addEventListener('toggle', showPerf);
+// growth is counted from when you open the panel (opening it again starts over)
+document.querySelector('[data-sec=perf]').addEventListener('toggle', (e) => { if (e.target.open) perfStart.clear(); showPerf(); });
 
 let autoScores = null; // what the auto expressions read from your face (set per tracked frame)
 const exprBase = new ExprBaseline(); // your relaxed face, learned as you go
@@ -487,6 +491,7 @@ async function useModel(buf, name) {
     for (const m of members.values()) sendToMember(m, { t: 'model-use', id });
     ownToOutput({ t: 'model', id, buf: buf.slice(0) });
     uploadModel();
+    if (mirrorOpen) setPreviewAvatar(false); // shown on your screen, not here
     renderPlacement();
   } catch (err) {
     alert('Could not load this model:\n' + err.message);
@@ -957,7 +962,7 @@ function syncMirror() {
   else if (mirrorOpen && !mirrorGoneTimer) mirrorGoneTimer = setTimeout(() => { mirrorGoneTimer = null; if (!mirrorTarget() && mirrorOpen) { window.vt.closeMirror(); showMirrorState(false); syncMirror(); } }, 6000);
   const show = ok || (mirrorOpen && !!mirrorGoneTimer);
   $('mirrorBtn').hidden = !show;
-  $('mirrorDisplay').hidden = !show || displayCount < 2;
+  $('mirrorDisplay').hidden = !show || !mirrorOpen || displayCount < 2; // only while it's on: which of your screens
   mirrorPos();
 }
 function mirrorPos() {
@@ -976,8 +981,26 @@ function mirrorPos() {
     for (const [id, p] of Object.entries(mpos)) mirCh.postMessage(wrapM(id, { t: 'pos', ...p }));
   } catch {}
 }
+// While "Show on my screen" is open your avatar isn't loaded in the preview at all (saves memory, CPU and
+// GPU): zoom, move and turn still work here and show there; hair is pulled on the mirror itself.
+let previewLoad = null;
+function setPreviewAvatar(on) {
+  if (!on) { stage.suspended = true; if (stage.vrm) stage.clearVRM(); return; }
+  stage.suspended = false;
+  if (stage.vrm || !modelBuf || previewLoad) return;
+  const id = modelId;
+  previewLoad = stage.loadVRM(modelBuf.slice(0), id).catch(() => {}).finally(() => {
+    previewLoad = null;
+    if (mirrorOpen) setPreviewAvatar(false); // opened again meanwhile
+    else if (modelId !== id) setPreviewAvatar(true);
+  });
+}
 function showMirrorState(open) {
   mirrorOpen = open;
+  document.body.classList.toggle('mirrorOn', open); // your avatar leaves the preview (the controls still work)
+  $('mirrorDisplay').hidden = !open || displayCount < 2 || $('mirrorBtn').hidden;
+  setPreviewAvatar(!open);
+  applyHideOthers();
   if (!open) lastMirrorPos = '';
   $('mirrorBtn').textContent = open ? 'Hide from my screen' : 'Show on my screen';
   $('mirrorBtn').classList.toggle('on', open);
@@ -985,6 +1008,11 @@ function showMirrorState(open) {
 $('mirrorBtn').onclick = () => {
   if (mirrorOpen) { window.vt.closeMirror(); showMirrorState(false); return; }
   if (!mirrorTarget()) return;
+  window.vt.openMirror({ displayId: Number($('mirrorDisplay').value) || 0 });
+};
+// another of your screens while it's on: move it there
+$('mirrorDisplay').onchange = () => {
+  if (!mirrorOpen || !mirrorTarget()) return;
   window.vt.openMirror({ displayId: Number($('mirrorDisplay').value) || 0 });
 };
 window.vt.onMirrorClosed(() => showMirrorState(false));
@@ -1247,7 +1275,7 @@ function sendViewersToMembers(now = false) {
     for (const m of members.values()) sendToMember(m, { t: 'viewers', list });
   };
   if (now) { clearTimeout(viewersToMembersTimer); go(); }
-  else if (!viewersToMembersTimer) viewersToMembersTimer = setTimeout(go, 300);
+  else if (!viewersToMembersTimer) viewersToMembersTimer = setTimeout(go, 120);
 }
 
 // ---- the other avatars beside yours in the preview ----
@@ -1281,7 +1309,7 @@ room.startDepth({ main: $('stage'), base: -10 });
 if (!GUEST) room.setHostLight(style.light); // the room's lighting is yours // bigger avatars further back
 function layoutNeighbors() {
   if (!room) return;
-  if (settings.hideOthers) for (const s of room.slots.values()) s.stage.suspended = true; // newcomers too
+  if (settings.hideOthers || mirrorOpen) for (const s of room.slots.values()) s.stage.suspended = true; // newcomers too
   const me = myId || 'h';
   const W = stage.canvas.clientWidth, H = stage.canvas.clientHeight;
   if (room.order.length <= 1 || !W || !H) return;
@@ -1360,7 +1388,8 @@ function syncObsPeer() {
 }
 // hide the others in my preview (only here: nobody else is affected)
 function applyHideOthers() {
-  const on = !!settings.hideOthers;
+  const on = !!settings.hideOthers || mirrorOpen; // with Show on my screen, the others are there too
+  $('hideOthersRow').hidden = mirrorOpen;
   $('neighbors').hidden = on;
   for (const s of room.slots.values()) s.stage.suspended = on; // not drawn at all meanwhile
 }
@@ -1393,7 +1422,7 @@ function joinHost() {
   try { old?.peer?.destroy(); } catch {}
   const p = new window.Peer(peerOptions());
   const h = host = { peer: p };
-  setNet('warn', `Joining room ${GUEST_CODE}…`);
+  setNet('warn', 'Joining the room…');
   const retry = (text, ms = 4000) => {
     if (h !== host || guestStopped) return;
     if (text) setNet('bad', text);
@@ -1408,7 +1437,7 @@ function joinHost() {
     m.on('open', () => {
       if (h !== host) return;
       h.lastHeard = performance.now();
-      setNet('ok', `In room ${GUEST_CODE} with your avatar`);
+      setNet('ok', 'In the room with your avatar');
       sendToHost({ t: 'member', name: meta.name });
       uploadModel();
       broadcastControl({ t: 'style', ...style });
@@ -1428,7 +1457,7 @@ function joinHost() {
   });
   p.on('error', (err) => {
     if (h !== host) return;
-    if (err.type === 'peer-unavailable') retry(`Room ${GUEST_CODE} isn't online. Retrying…`, 5000);
+    if (err.type === 'peer-unavailable') retry('The room isn\'t online. Retrying…', 5000);
     else retry('Connection problem (' + err.type + '). Retrying…');
   });
 }
@@ -1578,7 +1607,7 @@ function updateViewers() {
   $('viewerCount').textContent = settings.maxViewers ? `(${live.length} / ${settings.maxViewers})` : live.length ? `(${live.length})` : '';
   const box = $('viewers');
   box.classList.toggle('muted', !live.length);
-  if (!live.length) box.textContent = 'Nobody yet. Share the code.';
+  if (!live.length) box.textContent = GUEST ? 'Nobody watching yet.' : 'Nobody yet. Share the code.';
   else {
     box.innerHTML = '';
     for (const [id, v] of live) {
@@ -1960,6 +1989,7 @@ function sendPos(v, force = false) {
   if (!force && now - lastPosSend < 50) { posSendTimer = setTimeout(() => sendPos(v, true), 50); return; }
   lastPosSend = now;
   if (v.model?.open) v.model.send({ t: 'pos', x: v.pos.x, y: v.pos.y, s: v.pos.s, tb: !!v.pos.tb });
+  sendViewersToMembers(); // co-hosts see where you put the row on their placement screen
 }
 
 function updatePos(v, patch) {
@@ -2261,7 +2291,8 @@ function rayAt(e) {
 }
 // locked props (or all of them with "Lock all") can't be grabbed, resized or rotated in the preview
 let propsLocked = !!settings.propsLocked;
-const pickProp = (e) => (propsLocked ? null : stage.props.pick(rayAt(e), (d) => !props.find((p) => p.id === d.id)?.locked));
+const pickProp = (e) => (propsLocked || mirrorOpen ? null : // nothing to pick while your avatar is on your screen
+   stage.props.pick(rayAt(e), (d) => !props.find((p) => p.id === d.id)?.locked));
 $('lockAll').onclick = () => {
   propsLocked = settings.propsLocked = !propsLocked; saveSettings(); showLockAll();
   if (propsLocked) selectProp(null);

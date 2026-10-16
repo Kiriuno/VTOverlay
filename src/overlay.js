@@ -4,7 +4,7 @@ import { AvatarStage } from './shared/avatar.js';
 import { SpringGrabber } from './shared/grab.js';
 import { FxInput } from './shared/fx.js';
 import { normalizeProp } from './shared/props.js';
-import { Room, rowLayout, rowPos } from './shared/room.js';
+import { Room, rowLayout, rowPos, SLOT_STEP } from './shared/room.js';
 import { PEER_PREFIX, DEFAULT_POS, AVATAR_ASPECT, HEARTBEAT_MS, HEARTBEAT_TIMEOUT_MS, IDLE_HIDE_MS, peerOptions, effectiveZone } from './shared/protocol.js';
 
 const $ = (id) => document.getElementById(id);
@@ -278,7 +278,26 @@ function layoutBox() {
   const anchor = placeBox($('box'), stage, room ? rowPos(room.order, 'h', shown, zp.w / zp.h, stage.view.roll) : shown, zp);
   Object.assign($('anchor').style, anchor);
   layoutMembers();
+  sendHotRects();
 }
+
+// Full screen: tell the app where the avatars are drawn. Mouse moves are only passed to this see-through
+// window while the cursor is over one of them; elsewhere the window below keeps its own cursor (passing
+// every move made the cursor flicker between theirs and ours).
+let lastHot = '';
+function sendHotRects() {
+  if (MODE !== 'screen' || !window.vt.setHotRects) return;
+  const els = idleHidden ? [] : [$('box'), ...(room ? [...room.slots.values()].filter((s) => s.hasModel && !s.idle).map((s) => s.el) : [])];
+  // the avatar's box, widened a bit for hair and arms that reach out of it
+  const rects = els.map((el) => el._box).filter((b) => b && b.w > 0 && b.h > 0)
+    .map((b) => [Math.floor(b.left - b.w * 0.3), Math.floor(b.top - b.h * 0.1), Math.ceil(b.w * 1.6), Math.ceil(b.h * 1.25)]);
+  const key = JSON.stringify(rects);
+  if (key === lastHot) return;
+  lastHot = key;
+  window.vt.setHotRects(rects);
+}
+setInterval(sendHotRects, 500); // idle fades, co-hosts coming and going…
+
 
 /** Full screen, co-hosts: beside the host in the row, or (when the host allows) wherever they put themselves. */
 function layoutMembers() {
@@ -288,6 +307,7 @@ function layoutMembers() {
     const p = room.free && s.pos ? s.shown || (s.shown = { ...s.pos }) : rowPos(room.order, id, shown, zp.w / zp.h, stage.view.roll);
     placeBox(s.el, s.stage, p, zp);
   }
+  sendHotRects();
 }
 
 /** Put an avatar's drawing area (element `el` holding its canvas) at placement p in zone zp; returns the box's CSS. */
@@ -295,6 +315,7 @@ function placeBox(el, st, pIn, zp) {
   const p = clampPos(pIn, zp);
   const boxH = p.s * zp.h, boxW = boxH * AVATAR_ASPECT;
   const left = zp.x + p.x * zp.w - boxW / 2, top = zp.y + p.y * zp.h - boxH;
+  el._box = { left, top, w: boxW, h: boxH };
   const mS = boxH * MARGIN.side, mT = boxH * MARGIN.top, mB = boxH * MARGIN.bottom;
   const W = innerWidth, H = innerHeight;
   // wanted area, clipped to the window
@@ -385,7 +406,7 @@ if (MODE === 'screen') {
   });
   addEventListener('mouseup', () => { start = null; });
   const finish = (ok) => {
-    if (ok && draft && draft.w > 0.04 && draft.h > 0.06) commitZone(draft);
+    if (ok && draft) commitZone(minZone(draft));
     window.vt.zoneEditDone();
   };
   $('zoneDone').onclick = () => finish(true);
@@ -398,6 +419,18 @@ if (MODE === 'screen') {
   });
 }
 
+/**
+ * A zone too small to show the avatars is grown to a usable size, centred where it was drawn: at least a
+ * quarter of the screen high, and wide enough for the whole row at that height (co-hosts included).
+ */
+function minZone(z) {
+  const n = Math.max(1, room?.order.length || 1);
+  const MH = 0.25; // of the monitor
+  const MW = Math.min(1, Math.max(0.12, MH * innerHeight * (AVATAR_ASPECT + (n - 1) * SLOT_STEP) / innerWidth));
+  const w = Math.max(z.w, MW), h = Math.max(z.h, MH);
+  const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
+  return { x: Math.max(0, Math.min(1 - w, cx - w / 2)), y: Math.max(0, Math.min(1 - h, cy - h / 2)), w, h };
+}
 function commitZone(z) {
   zone = { x: +z.x.toFixed(4), y: +z.y.toFixed(4), w: +z.w.toFixed(4), h: +z.h.toFixed(4) };
   store.set('vt-zone', zone);
@@ -407,29 +440,61 @@ function commitZone(z) {
 }
 
 // ---------------- model cache (so mode switches / reconnects don't re-download) ----------------
+// Broadcasters' models are kept scrambled (AES-GCM with a key made on this PC that can't be read out), so
+// the cache can't simply be found and opened as a .vrm. Versions before 0.9.1 kept them as plain data in
+// 'vt-rx': that whole database is deleted once (its files go away, not just its entries).
+const CACHE_DB = 'vt-rx2';
+try {
+  if (localStorage.getItem('vt-old-cache-gone') !== '1') {
+    const del = indexedDB.deleteDatabase('vt-rx');
+    del.onsuccess = () => { try { localStorage.setItem('vt-old-cache-gone', '1'); } catch {} };
+  }
+} catch {}
+let dbPromise = null;
 function idb() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open('vt-rx', 1);
+  return dbPromise || (dbPromise = new Promise((res, rej) => {
+    const r = indexedDB.open(CACHE_DB, 1);
     r.onupgradeneeded = () => r.result.createObjectStore('kv');
-    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
-  });
+    r.onsuccess = () => res(r.result); r.onerror = () => { dbPromise = null; rej(r.error); };
+  }));
 }
-async function cacheGet() {
-  try {
-    const db = await idb();
-    return await new Promise((res) => { const r = db.transaction('kv').objectStore('kv').get('model'); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); });
-  } catch { return null; }
-}
-async function cachePut(rec) {
-  try { const db = await idb(); db.transaction('kv', 'readwrite').objectStore('kv').put(rec, 'model'); } catch {}
-}
-let cachedId = null;
-cacheGet().then((rec) => { cachedId = rec?.id ?? null; });
-
-// ---------------- props: images arrive on request and are cached by hash ----------------
-const idbProp = (mode, fn) => idb().then((db) => new Promise((res) => {
+const idbRaw = (mode, fn) => idb().then((db) => new Promise((res) => {
   const r = fn(db.transaction('kv', mode).objectStore('kv')); r.onsuccess = () => res(r.result ?? null); r.onerror = () => res(null);
 })).catch(() => null);
+let keyPromise = null;
+function cacheKey() {
+  return keyPromise || (keyPromise = (async () => {
+    const k = await idbRaw('readonly', (st) => st.get('key'));
+    if (k) return k;
+    const nk = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); // false: never exportable
+    await idbRaw('readwrite', (st) => st.put(nk, 'key'));
+    return nk;
+  })().catch(() => { keyPromise = null; return null; }));
+}
+async function scramble(buf) {
+  const key = await cacheKey();
+  if (!key) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  return { iv, data: await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf) };
+}
+async function unscramble(rec) {
+  try { const key = await cacheKey(); return key && rec?.iv && rec.data ? await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv }, key, rec.data) : null; } catch { return null; }
+}
+async function cacheGet() {
+  const rec = await idbRaw('readonly', (st) => st.get('model'));
+  if (!rec?.id) return null;
+  const buf = await unscramble(rec);
+  return buf ? { id: rec.id, buf } : null;
+}
+async function cachePut(rec) {
+  const s = await scramble(rec.buf).catch(() => null);
+  if (s) idbRaw('readwrite', (st) => st.put({ id: rec.id, ...s }, 'model'));
+}
+let cachedId = null;
+idbRaw('readonly', (st) => st.get('model')).then((rec) => { cachedId = rec?.id ?? null; }); // just the id: no need to unscramble it
+
+// ---------------- props: images arrive on request and are cached by hash ----------------
+const idbProp = idbRaw;
 const propWaiters = new Map(); // hash -> [resolve]
 const incomingProps = new Map(); // hash -> { mime, size, chunks, parts, got }
 const propLoader = async (hash) => {
@@ -468,9 +533,11 @@ async function showModel(buf, id) {
 // ---------------- co-hosts (multi-model rooms) ----------------
 // Their avatars come wrapped as { t:'mm', m, d } and stand in a row with the host's (see shared/room.js).
 const memberCache = {
-  get: (id) => idbProp('readonly', (st) => st.get('model:' + id)),
+  get: async (id) => unscramble(await idbProp('readonly', (st) => st.get('model:' + id))),
   put: async (id, buf) => {
-    await idbProp('readwrite', (st) => st.put(buf, 'model:' + id));
+    const s = await scramble(buf).catch(() => null);
+    if (!s) return;
+    await idbProp('readwrite', (st) => st.put(s, 'model:' + id));
     // keep only the last few co-host models on disk
     let ids = [];
     try { ids = JSON.parse(localStorage.getItem('vt-member-models') || '[]'); } catch {}

@@ -57,7 +57,7 @@ export const DEFAULT_STYLE = {
   pose: 'stand', // body pose, one of POSES
 };
 /** Body poses the broadcaster can pick (legs, hips, a bit of spine; head, face and arms stay tracked). */
-export const POSES = [['stand', 'Standing'], ['relaxed', 'Relaxed (weight on one leg)'], ['walk', 'Walking'], ['griddy', 'Griddy (dance)'], ['sit', 'Sitting (chair)'], ['sitCross', 'Sitting (chair), legs crossed'], ['floor', 'Sitting on the floor'], ['kneel', 'Kneeling'], ['seiza', 'Sitting back on the knees']];
+export const POSES = [['stand', 'Standing'], ['relaxed', 'Relaxed (weight on one leg)'], ['walk', 'Walking'], ['griddy', 'Griddy (dance)'], ['six7', '6 7 (dance)'], ['sit', 'Sitting (chair)'], ['sitCross', 'Sitting (chair), legs crossed'], ['floor', 'Sitting on the floor'], ['kneel', 'Kneeling'], ['seiza', 'Sitting back on the knees']];
 /** Clean up a style received from the network / storage (anything missing → default). */
 export function normalizeStyle(st = {}) {
   const num = (v, d, lo, hi) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.max(lo, Math.min(hi, +v)) : d);

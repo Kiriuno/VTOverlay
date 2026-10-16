@@ -1,6 +1,6 @@
 {
   "name": "vtoverlay",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Stream your VTuber avatar onto a friend's desktop",
   "main": "main.js",
   "scripts": {
@@ -22,6 +22,7 @@
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.3",
     "@electron/packager": "^20.3.0",
     "electron": "^44.7.0"
   },

@@ -65,7 +65,8 @@ const MIME = {
 };
 const MODES = ['floating', 'window', 'screen'];
 const MODE_NAMES = { floating: 'Floating widget', window: 'Window', screen: 'Full screen' };
-const ICON = path.join(__dirname, 'assets', 'icon.png');
+// Windows picks the right size from the .ico (a simpler "VTO" drawing for the small ones: taskbar, title bar)
+const ICON = path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
 const HOTKEY = 'CommandOrControl+Alt+V';
 
 let mainWin = null;    // launcher / sender window
@@ -108,7 +109,10 @@ const webPrefs = {
   contextIsolation: true,
   nodeIntegration: false,
   backgroundThrottling: false, // keep tracking / rendering when not focused
+  devTools: !app.isPackaged, // release builds: no developer tools (they'd show what the page holds, e.g. a broadcaster's avatar)
 };
+// …nor a remote debugger attached from the command line
+if (app.isPackaged && ['remote-debugging-port', 'remote-debugging-pipe', 'inspect', 'inspect-brk'].some((sw) => app.commandLine.hasSwitch(sw))) app.exit(0);
 
 // ---------- clean shutdown: let the page tell the other side "bye" before it disappears ----------
 const goodbyeWaiters = new Map(); // webContents id -> resolve
@@ -313,28 +317,62 @@ ipcMain.on('output-open', (_e, opts = {}) => {
 });
 ipcMain.on('output-close', () => closeOutput());
 
+/**
+ * A full-screen avatar layer on monitor `d`: the viewer's Full screen mode and the broadcaster's
+ * "Show on my screen" are both made here, so they always sit in the same place among the other
+ * windows (on top of apps, the taskbar's own behaviour unchanged) and behave the same.
+ * See-through, click-through (the page takes the mouse only over grabbable parts), never focused.
+ */
+function createScreenLayer(d, url, { title = 'VTOverlay', guard = false } = {}) {
+  const opts = {
+    ...d.bounds, transparent: true, frame: false, resizable: false, movable: false, hasShadow: false,
+    skipTaskbar: true, alwaysOnTop: true, focusable: false, backgroundColor: '#00000000', title,
+  };
+  const win = guard ? newWindow(opts) : new BrowserWindow({ icon: ICON, webPreferences: webPrefs, ...opts });
+  if (!guard) win.removeMenu();
+  win.setBounds(d.bounds); // some setups ignore the initial position on secondary monitors
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true);
+  win.loadURL(url);
+  win.setIgnoreMouseEvents(true, { forward: true });
+  win.setFocusable(false);
+  win.hotRects = null; // where its avatars are (from the page); null = not known yet: pass every move
+  win.forwarding = true;
+  return win;
+}
+
+// Mouse moves reach a full-screen layer only while the cursor is over one of its avatars (plus a margin).
+// Passing every move to a see-through window makes the cursor flicker on Windows between the cursor of the
+// window below and this one's.
+ipcMain.on('overlay-hot-rects', (e, rects) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  if (w && Array.isArray(rects)) w.hotRects = rects.filter((r) => Array.isArray(r) && r.length === 4 && r.every(Number.isFinite));
+});
+const screenLayers = () => [overlayWin && rx.mode === 'screen' && overlayWin, mirrorWin].filter((w) => w && !w.isDestroyed());
+setInterval(() => {
+  const layers = screenLayers();
+  if (!layers.length) return;
+  const c = screen.getCursorScreenPoint();
+  for (const w of layers) {
+    if (w.capturing || (w === overlayWin && rx.editingZone)) continue; // it has the mouse right now
+    const b = w.getBounds(), x = c.x - b.x, y = c.y - b.y, m = 24;
+    const over = !w.hotRects || w.hotRects.some(([l, t, wd, h]) => x >= l - m && x <= l + wd + m && y >= t - m && y <= t + h + m);
+    if (over !== w.forwarding) { w.forwarding = over; w.setIgnoreMouseEvents(true, { forward: over }); }
+  }
+}, 50);
+
 // Mirror: the broadcaster's own avatar, full screen on their monitor, placed exactly like on the
 // viewer they picked (a click-through full-screen overlay, fed by the broadcaster window).
 let mirrorWin = null, mirrorDisplayId = null;
 function closeMirror() { if (mirrorWin && !mirrorWin.isDestroyed()) { mirrorWin._managedClose = true; mirrorWin.destroy(); } mirrorWin = null; }
 ipcMain.on('mirror-open', (_e, opts = {}) => {
-  closeMirror();
+  // replacing it (another screen picked): the old one goes quietly, it's not "closed" for the broadcaster
+  const old = mirrorWin; mirrorWin = null;
+  if (old && !old.isDestroyed()) { old._managedClose = true; old.destroy(); }
   const d = displayById(Number(opts.displayId));
   mirrorDisplayId = d.id;
-  const win = mirrorWin = new BrowserWindow({
-    icon: ICON, webPreferences: webPrefs, ...d.bounds, transparent: true, frame: false, resizable: false, movable: false,
-    hasShadow: false, skipTaskbar: true, alwaysOnTop: true, focusable: false, backgroundColor: '#00000000', title: 'VTOverlay mirror',
-  });
-  win.removeMenu();
-  win.setBounds(d.bounds);
-  win.setAlwaysOnTop(true, 'screen-saver');
-  win.setVisibleOnAllWorkspaces(true);
-  win.setIgnoreMouseEvents(true, { forward: true });
-  win.loadURL(pageUrl('overlay.html', { mode: 'screen', mirror: '1', interact: '1', code: '' }));
-  // Windows sometimes drops a window of the same app below another one when you click around: put it
-  // back on top every few seconds (cheap, and only while it's open)
-  const keepOnTop = setInterval(() => { if (!win.isDestroyed()) { win.setAlwaysOnTop(true, 'screen-saver'); win.moveTop(); } }, 2000);
-  win.on('closed', () => { clearInterval(keepOnTop); if (mirrorWin === win) mirrorWin = null; try { mainWin?.webContents.send('mirror-closed'); } catch {} });
+  const win = mirrorWin = createScreenLayer(d, pageUrl('overlay.html', { mode: 'screen', mirror: '1', interact: '1', code: '' }), { title: 'VTOverlay mirror' });
+  win.on('closed', () => { if (mirrorWin === win) mirrorWin = null; try { mainWin?.webContents.send('mirror-closed'); } catch {} });
 });
 ipcMain.on('mirror-close', () => closeMirror());
 
@@ -392,14 +430,9 @@ function openOverlay() {
   const qs = new URLSearchParams({ code: rx.code, mode: rx.mode, name: rx.name, interact: rx.interact ? '1' : '0', low: rx.lowPower ? '1' : '0', fps: String(rx.fps) });
   let win;
   if (rx.mode === 'window') {
-    win = newWindow({ width: 520, height: 720, title: `VTOverlay: ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true }, { hideToTray: true });
+    win = newWindow({ width: 520, height: 720, title: 'VTOverlay', backgroundColor: '#14121a', autoHideMenuBar: true }, { hideToTray: true });
   } else if (rx.mode === 'screen') {
-    const d = displayById(rx.displayId);
-    win = newWindow({
-      ...d.bounds, transparent: true, frame: false, resizable: false, movable: false, hasShadow: false,
-      skipTaskbar: true, alwaysOnTop: true, focusable: false, backgroundColor: '#00000000', title: 'VTOverlay',
-    });
-    win.setBounds(d.bounds); // some setups ignore the initial position on secondary monitors
+    win = createScreenLayer(displayById(rx.displayId), pageUrl('overlay.html', Object.fromEntries(qs)), { guard: true }); // same as Show on my screen
   } else {
     const area = screen.getPrimaryDisplay().workArea;
     const w = 420, h = 620;
@@ -410,15 +443,14 @@ function openOverlay() {
     });
   }
   overlayWin = win;
-  if (rx.mode !== 'window') {
+  if (rx.mode === 'floating') {
     win.setAlwaysOnTop(true, 'screen-saver');
     win.setVisibleOnAllWorkspaces(true);
   }
-  win.loadURL(pageUrl('overlay.html', Object.fromEntries(qs)));
+  if (rx.mode !== 'screen') win.loadURL(pageUrl('overlay.html', Object.fromEntries(qs)));
   win.on('closed', () => { if (overlayWin === win) overlayWin = null; });
 
   if (rx.mode === 'floating') setLocked(false); // start in edit mode so they can place it
-  if (rx.mode === 'screen') setClickThrough(true);
   win.webContents.once('did-finish-load', () => {
     if (rx.mode === 'screen' && rx.share) setSharing(true);
   });
@@ -439,7 +471,7 @@ function openPanel() {
   const area = screen.getPrimaryDisplay().workArea;
   panelWin = newWindow({
     width: 380, height: 400, x: area.x + 24, y: area.y + area.height - 424,
-    title: `VTOverlay: ${rx.code}`, backgroundColor: '#14121a', autoHideMenuBar: true,
+    title: 'VTOverlay', backgroundColor: '#14121a', autoHideMenuBar: true,
     resizable: false, maximizable: false, fullscreenable: false,
   }, { hideToTray: true });
   panelWin.loadURL(pageUrl('panel.html'));
@@ -461,7 +493,7 @@ function pushState() {
     alwaysOnTop: !!overlayWin && !overlayWin.isDestroyed() && overlayWin.isAlwaysOnTop(),
   };
   if (panelWin && !panelWin.isDestroyed()) panelWin.webContents.send('rx-state', state);
-  if (panelWin && !panelWin.isDestroyed()) panelWin.setTitle(`VTOverlay: ${rx.code}`);
+  if (panelWin && !panelWin.isDestroyed()) panelWin.setTitle('VTOverlay'); // no room code in the title bar (it can be hidden in the window)
   refreshTray();
 }
 
@@ -476,7 +508,7 @@ async function doAction(action, arg) {
     case 'zone-toggle': return rx.mode === 'screen' && setEditingZone(!rx.editingZone);
     case 'zone-reset': return overlayWin?.webContents.send('zone-reset');
     case 'share': return setSharing(!!arg);
-    case 'on-top': overlayWin?.setAlwaysOnTop(!!arg); return pushState();
+    case 'on-top': overlayWin?.setAlwaysOnTop(!!arg, 'screen-saver'); return pushState();
     case 'interact':
       rx.interact = !!arg; writePrefs({ interact: rx.interact });
       overlayWin?.webContents.send('interact-changed', rx.interact);
@@ -545,6 +577,7 @@ ipcMain.on('rx-disconnect', () => disconnectReceiver());
 function setClickThrough(on) {
   if (!overlayWin) return;
   overlayWin.setIgnoreMouseEvents(on, { forward: true });
+  overlayWin.forwarding = true; // (re)checked against where the avatars are, see screenLayers
   if (rx.mode === 'screen') {
     overlayWin.setFocusable(!on);
     if (!on) overlayWin.focus();
@@ -554,9 +587,10 @@ function setClickThrough(on) {
 // A click-through overlay (full screen, or a locked floating widget) briefly takes the mouse while the
 // cursor is over a part of the avatar that can be grabbed (hair, clothes…), and gives it back after.
 ipcMain.on('overlay-capture-mouse', (_e, on) => {
-  if (isMirror(_e)) { mirrorWin.setIgnoreMouseEvents(!on, { forward: true }); return; } // click-through except over the avatar's hair, nose…
+  if (isMirror(_e)) { mirrorWin.capturing = on; mirrorWin.forwarding = true; mirrorWin.setIgnoreMouseEvents(!on, { forward: true }); return; } // click-through except over the avatar's hair, nose…
   if (!overlayWin || overlayWin.isDestroyed()) return;
   const clickThrough = (rx.mode === 'screen' && !rx.editingZone) || (rx.mode === 'floating' && rx.locked);
+  overlayWin.capturing = on; overlayWin.forwarding = true;
   if (clickThrough) overlayWin.setIgnoreMouseEvents(!on, { forward: true });
 });
 
@@ -618,7 +652,7 @@ ipcMain.on('quit', () => quitApp());
 function trayMenu() {
   const displays = screen.getAllDisplays();
   const items = [
-    { label: `Watching room ${rx.code}`, enabled: false },
+    { label: "Watching a friend's avatar", enabled: false },
     { type: 'separator' },
   ];
   items.push({ label: rx.mode === 'window' ? 'Show window' : 'Show controls', click: () => showReceiverWindow() });
@@ -665,7 +699,7 @@ function trayMenu() {
 function refreshTray() {
   if (!tray) return;
   tray.setContextMenu(trayMenu());
-  tray.setToolTip(`VTOverlay: ${rx.code}${rx.sharing ? ', sharing screen' : ''}`);
+  tray.setToolTip(`VTOverlay${rx.sharing ? ': sharing screen' : ''}`);
 }
 
 function createTray() {
@@ -673,7 +707,7 @@ function createTray() {
   let icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   const hi = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray@2x.png'));
   if (!hi.isEmpty()) icon.addRepresentation({ scaleFactor: 2, buffer: hi.toPNG() });
-  if (icon.isEmpty()) icon = nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.on('click', () => showReceiverWindow());
   refreshTray();

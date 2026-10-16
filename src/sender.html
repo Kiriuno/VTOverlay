@@ -81,6 +81,10 @@
   /* the avatars (yours and the others) are layered below everything else in the preview: bigger ones further
      back (z-index set from the script, all negative inside this isolated area) */
   #stageWrap { isolation: isolate; }
+  /* "Show on my screen" is on: your avatar is there, not here (still there to drag, zoom, turn) */
+  body.mirrorOn #stage { opacity: 0; }
+  #mirrorNote { display: none; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; font-size: 13px; pointer-events: none; }
+  body.mirrorOn:not(.placing) #mirrorNote { display: block; }
   #neighbors { position: absolute; inset: 0; pointer-events: none; }
   #neighbors .member { position: absolute; inset: 0; }
   #neighbors .memberCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -101,7 +105,7 @@
   /* OBS only: no viewers (no placing on their screen, no viewer list); no code while nobody can join */
   body.obsOnly #tabs, body.obsOnly #maxViewersRow, body.obsOnly #freeRow, body.obsOnly #viewers, body.obsOnly #viewerCount,
   body.obsOnly #newCode, body.obsOnly.offline .codeRow, body.obsOnly.offline details[data-sec="viewers"] { display: none !important; }
-  body.guest #newCode, body.guest #maxViewersRow, body.guest #roomModelsRow, body.guest #freeRow, body.guest #hideCode,
+  body.guest #newCode, body.guest #maxViewersRow, body.guest #roomModelsRow, body.guest #freeRow,
   body.guest #frBtn, body.guest #viewTools .sep, body.guest details[data-sec="view"], body.guest #lightSec,
   body.guest #mirrorBtn, body.guest #mirrorDisplay, body.guest #viewers .vrow button, body.guest #placeAdd { display: none !important; }
   #guestNote { display: none; }
@@ -192,6 +196,7 @@
   <div id="stageWrap">
     <canvas id="stage"></canvas>
     <div id="neighbors"></div>
+    <div id="mirrorNote">Your avatar is on your screen<br><span class="muted">Zoom, move and turn still work here; pull hair there</span></div>
     <div id="empty"><div><p style="font-size:16px;margin:0 0 6px">No avatar loaded</p>
       <p class="muted" style="margin:0">Load a <b>.vrm</b> on the right (free ones: VRoid Studio, VRoid Hub).</p></div></div>
     <div id="trackState"><span class="dot" id="trackDot"></span><span id="trackText">Starting camera…</span></div>
@@ -254,7 +259,7 @@
       <div id="rowPlace" hidden style="margin-top:8px">
         <div class="hint muted" id="rowPlaceText"></div>
         <div class="row" style="margin-top:4px"><button id="moveLeft" title="Swap places with the avatar on your left">Move left</button><button id="moveRight" title="Swap places with the avatar on your right">Move right</button></div>
-        <label class="toggle" title="Only here: everyone else still sees them">Hide the others in my preview <input type="checkbox" id="hideOthers"></label>
+        <label class="toggle" id="hideOthersRow" title="Only here: everyone else still sees them">Hide the others in my preview <input type="checkbox" id="hideOthers"></label>
       </div>
       <div class="row" style="margin-top:8px" title="Tracking still works on top of it"><span style="flex:none">Pose</span><select id="poseSel" style="flex:1"></select></div>
       <div class="hint muted" style="margin-top:6px">Your webcam image stays on this computer: only your movements and model are sent.</div>
@@ -378,7 +383,7 @@
     </details>
 
     <details class="sec" data-sec="perf"><summary><h3>Performance</h3></summary>
-      <div class="hint muted" style="margin:-2px 0 6px">Memory and CPU of each part, refreshed while this is open.</div>
+      <div class="hint muted" style="margin:-2px 0 6px">Memory and CPU of each part, refreshed while this is open; growth counts from when you open it.</div>
       <div id="perfRows" class="muted" style="font-size:12px"></div>
     </details>
 

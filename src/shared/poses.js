@@ -7,7 +7,8 @@
 //   hp, hr       hips pitch (top forward) and roll (left side down)
 //   sp, sr       spine lean forward / to the left
 //   per leg (l… / r…):  F thigh forward, O thigh outward, T knee turned outward, K knee bend, A toes down
-//   per arm (la / ra):  F arm swung forward, E extra elbow bend (on top of the relaxed arm pose)
+//   per arm (la / ra):  F arm swung forward, E extra elbow bend (on top of the relaxed arm pose), T forearm
+//                       turned (palm up)
 //   cy           chest turned to the left (around the vertical)
 // Hands resting somewhere (on the hip, the thighs…) are placed by IK, see poseArms.
 
@@ -46,6 +47,13 @@ export function poseValues(name, t, m) {
         lF: 0.1 + 0.75 * l, lK: 0.3 - 0.22 * l, lA: -0.7 * l,
         rF: 0.1 + 0.75 * r, rK: 0.3 - 0.22 * r, rA: -0.7 * r,
         laF: 0.15 - 0.75 * sn, raF: 0.15 + 0.75 * sn, laE: 1.15, raE: 1.15,
+      };
+    }
+    case 'six7': { // "6 7": hands out in front, palms up, bobbing up and down in turn as if weighing two things
+      const ph = t * Math.PI * 2 * 1.5, sn = Math.sin(ph);
+      return {
+        bob: -0.01 * k * Math.abs(sn), sp: 0.05, cy: 0.05 * sn, sr: 0.02 * sn,
+        laF: 0.3 + 0.08 * sn, raF: 0.3 - 0.08 * sn, laE: 1.25 + 0.28 * sn, raE: 1.25 - 0.28 * sn, laT: -1.4, raT: -1.4,
       };
     }
     case 'sitCross': { // on a chair, right leg crossed over the left knee
@@ -94,4 +102,4 @@ export function poseArms(name) {
   }
 }
 
-export const POSE_KEYS = ['hx', 'hy', 'bob', 'hz', 'hp', 'hr', 'sp', 'sr', 'cy', 'lF', 'lO', 'lT', 'lK', 'lA', 'rF', 'rO', 'rT', 'rK', 'rA', 'laF', 'raF', 'laE', 'raE'];
+export const POSE_KEYS = ['hx', 'hy', 'bob', 'hz', 'hp', 'hr', 'sp', 'sr', 'cy', 'lF', 'lO', 'lT', 'lK', 'lA', 'rF', 'rO', 'rT', 'rK', 'rA', 'laF', 'raF', 'laE', 'raE', 'laT', 'raT'];

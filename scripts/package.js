@@ -34,6 +34,21 @@ function checkDependencies() {
   }
 }
 
+// Release builds can't be started as a plain Node.js runtime or with a debugger attached (that would make
+// it easy to read what the app holds, e.g. a broadcaster's avatar), and only run the app from its archive.
+async function lockDown(out, name) {
+  const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
+  const exe = path.join(out, PLATFORM === 'win32' ? name + '.exe' : name);
+  await flipFuses(exe, {
+    version: FuseVersion.V1,
+    [FuseV1Options.RunAsNode]: false,
+    [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+    [FuseV1Options.EnableNodeCliInspectArguments]: false,
+    [FuseV1Options.OnlyLoadAppFromAsar]: true,
+  });
+  console.log('✔ locked down (no Node / debugger launch)');
+}
+
 async function build(key) {
   const { packager } = await import('@electron/packager');
   const t = TARGETS[key];
@@ -62,6 +77,7 @@ async function build(key) {
       fs.writeFileSync(file, JSON.stringify(json, null, 2));
     }],
   });
+  await lockDown(out, t.name);
   fs.copyFileSync(path.join(ROOT, 'README.md'), path.join(out, 'README.md'));
   console.log(`✔ ${t.name} → ${path.relative(ROOT, out)}`);
   if (ZIP) {

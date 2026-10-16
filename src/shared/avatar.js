@@ -283,6 +283,7 @@ export class AvatarStage {
     this.scene.remove(this.vrm.scene);
     VRMUtils.deepDispose(this.vrm.scene);
     this.vrm = null;
+    this.springJoints = []; this.jointByBone = new Map(); this.grabs.clear(); // let the old model be freed
     this.modelId = null;
   }
 
@@ -360,8 +361,9 @@ export class AvatarStage {
     const set = (n, x, y, z) => { const b = hb(n); if (b) b.rotation.set(x, y, z); };
     set('leftUpperArm', -s * P.laF, 0, s * (-1.22 + sway));
     set('rightUpperArm', -s * P.raF, 0, s * (1.22 - sway));
-    set('leftLowerArm', 0, -0.25 - P.laE, 0); // rotation about Y is the same in both frames
-    set('rightLowerArm', 0, 0.25 + P.raE, 0);
+    // elbow bend about Y (the same in both frames), then the forearm turned about its own length (palm up)
+    hb('leftLowerArm')?.rotation.set(s * P.laT, -0.25 - P.laE, 0, 'YXZ');
+    hb('rightLowerArm')?.rotation.set(s * P.raT, 0.25 + P.raE, 0, 'YXZ');
     set('leftHand', 0, 0, -0.1 * s);
     set('rightHand', 0, 0, 0.1 * s);
     this._idleFingers(t);
