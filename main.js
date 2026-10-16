@@ -249,9 +249,15 @@ ipcMain.on('open-external', (_e, url) => {
 
 function displayList() {
   const primary = screen.getPrimaryDisplay().id;
-  return screen.getAllDisplays().map((d, i) => ({
-    id: d.id, label: `Screen ${i + 1}, ${d.size.width}×${d.size.height}${d.id === primary ? ' (main)' : ''}`,
-  }));
+  return screen.getAllDisplays().map((d, i) => {
+    const b = d.bounds, w = d.workArea, f = (n) => +n.toFixed(4);
+    return {
+      id: d.id, label: `Screen ${i + 1}, ${d.size.width}×${d.size.height}${d.id === primary ? ' (main)' : ''}`,
+      // for placing on your own screen ("My screen"): its shape and where the taskbar is
+      aspect: f(b.width / b.height),
+      work: { x: f((w.x - b.x) / b.width), y: f((w.y - b.y) / b.height), w: f(w.width / b.width), h: f(w.height / b.height) },
+    };
+  });
 }
 
 ipcMain.handle('start-sender', (_e, o) => startSenderPage(o?.obs ? { obs: '' } : o?.room ? { room: '1' } : {}));

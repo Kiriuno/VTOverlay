@@ -45,7 +45,7 @@ let guestRetry = null, guestStopped = false, guestViewers = [];
 // ---------------- settings ----------------
 const settings = loadSettings();
 function loadSettings() {
-  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, viewerSlap: false, voiceMouth: false, voiceGain: 1, micId: '', roomModels: 1, freePlace: false, exprCal: {}, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
+  const defaults = { v: 2, mirror: true, swapLR: true, hideCam: false, autoExpr: true, autoSubtle: false, arms: false, linkEyes: false, smoothing: 0.5, mouthGain: 1.6, blinkGain: 1.5, bodyX: 1, bodyY: 1, bodyZ: 0.5, mouthMax: 1, blinkMax: 1, armSmoothing: 0.6, viewerGrab: false, viewerPat: true, viewerSlap: false, voiceMouth: false, voiceGain: 1, micId: '', roomModels: 1, freePlace: false, exprCal: {}, exprTune: {}, maxViewers: 0, camId: '', style: DEFAULT_STYLE, models: {}, lightPresets: {} };
   try {
     const saved = JSON.parse(localStorage.getItem('vt-settings') || '{}');
     if (!saved.v) delete saved.mirror; // v1 defaulted mirror off, which felt backwards
@@ -126,15 +126,17 @@ queueMicrotask(renderSlapBones); // once the preview exists
 $('slapTest').onclick = () => { stage.fx.slap(); toOutput({ t: 'fx', k: 'slap' }); };
 
 const permMsg = () => ({ t: 'perm', grab: !!settings.viewerGrab, pat: !!settings.viewerPat, slap: !!settings.viewerSlap });
-for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'arms', 'linkEyes', 'viewerGrab', 'viewerPat', 'viewerSlap']) {
+for (const k of ['mirror', 'swapLR', 'hideCam', 'autoExpr', 'autoSubtle', 'arms', 'linkEyes', 'viewerGrab', 'viewerPat', 'viewerSlap']) {
   $(k).checked = settings[k];
   $(k).onchange = () => {
     settings[k] = $(k).checked; saveSettings(); applyToggles();
+    if (k === 'autoExpr') $('autoSubtleRow').hidden = !settings.autoExpr;
     if (k === 'arms' && !paused) openCamera(); // switch camera resolution (720p for hands)
     if (k === 'viewerGrab') setViewerGrab(settings.viewerGrab);
     if (k === 'viewerPat' || k === 'viewerSlap') broadcastControl(permMsg());
   };
 }
+$('autoSubtleRow').hidden = !settings.autoExpr; // only matters with auto expressions on
 for (const k of ['mouthGain', 'blinkGain', 'mouthMax', 'blinkMax', 'smoothing', 'bodyX', 'bodyY', 'bodyZ', 'armSmoothing']) {
   $(k).value = settings[k];
   $(k).oninput = () => {
@@ -896,8 +898,16 @@ const mirCh = new BroadcastChannel('vt-mirror');
 let mirrorOpen = false;
 const toOutput = (msg) => {
   if (outputOpen) { try { outCh.postMessage(msg); } catch {} }
-  if (mirrorOpen) { try { mirCh.postMessage(msg); } catch {} }
+  if (mirrorOpen) { try { mirCh.postMessage(forMirror(msg)); } catch {} }
 };
+// a co-host's mirror lets them touch only their own avatar (the others' switches read as off there)
+const NO_TOUCH = { t: 'perm', grab: false, pat: false, slap: false };
+function forMirror(msg) {
+  if (!GUEST || !msg) return msg;
+  if (msg.t === 'perm') return NO_TOUCH;
+  if (msg.t === 'mm' && msg.m !== myId && msg.d?.t === 'perm') return { ...msg, d: NO_TOUCH };
+  return msg;
+}
 const localPageHandler = (ch, onHello) => async ({ data: d }) => {
   if (d?.t === 'hello') {
     postLocalState(ch);
@@ -908,7 +918,7 @@ const localPageHandler = (ch, onHello) => async ({ data: d }) => {
 };
 /** Everything a local page (camera output, mirror) needs: my avatar, and everyone else's in a room. */
 function postLocalState(ch) {
-  const post = (msg) => { try { ch.postMessage(msg); } catch {} };
+  const post = (msg) => { try { ch.postMessage(ch === mirCh ? forMirror(msg) : msg); } catch {} };
   const own = (msg) => post(GUEST ? wrapM(myId || 'me', msg) : msg);
   if (room && room.order.length > 1) post({ t: 'members', order: [...room.order], names: room.names, free: room.free });
   post({ t: 'view', ...(GUEST ? hostView || view : view) }); // the host's (its avatar is the page's main one)
@@ -921,7 +931,7 @@ function postLocalState(ch) {
 }
 /** Another avatar of the room (look, props, switches, model) to a local page. */
 function postMemberState(ch, id) {
-  const post = (msg) => { try { ch.postMessage(id === 'h' ? msg : wrapM(id, msg)); } catch {} };
+  const post = (msg) => { try { const m = id === 'h' ? msg : wrapM(id, msg); ch.postMessage(ch === mirCh ? forMirror(m) : m); } catch {} };
   if (GUEST) { // what I have of them is in my preview
     const slot = room.slot(id);
     if (!slot) return;
@@ -942,17 +952,29 @@ function postMemberState(ch, id) {
   if (m.modelBuf) post({ t: 'model', id: m.modelId, buf: m.modelBuf.slice(0) });
 }
 outCh.onmessage = localPageHandler(outCh, () => showOutputState(true));
-const mirrorHandler = localPageHandler(mirCh, () => { mirrorOpen = true; mirCh.postMessage(permMsg()); mirrorPos(); showMirrorState(true); });
+const mirrorHandler = localPageHandler(mirCh, () => { mirrorOpen = true; if (!GUEST) mirCh.postMessage(permMsg()); mirrorPos(); showMirrorState(true); });
 // you can pat, boop, slap and pull hair on your mirror, like a viewer (same permission switches)
 const mirrorAsViewer = { n: 'm', pos: { ...DEFAULT_POS } };
 mirCh.onmessage = (ev) => {
   const d = ev.data;
-  if (d && (d.t === 'fx' || d.t === 'grab')) { onViewerMessage('mirror', mirrorAsViewer, d); return; }
+  if (d && (d.t === 'fx' || d.t === 'grab')) {
+    if (!GUEST) { onViewerMessage('mirror', mirrorAsViewer, d); return; }
+    if (d.m !== myId) return; // a co-host's mirror: only their own avatar
+    if (d.t === 'grab') sendToHost({ t: 'grab', j: d.j, p: d.p });
+    else sendToHost({ t: 'fx', k: d.k, r: d.r, d: d.d });
+    return;
+  }
   mirrorHandler(ev);
 };
 let lastMirrorPos = '';
 // only for a viewer in Full screen mode: if they leave it (or leave), yours goes away too
-const mirrorTarget = () => { const v = viewers.get(selectedViewer); return v && v.state?.mode === 'screen' && (v.motion?.open || v.model?.open) ? v : null; };
+// (or your own screen, see selfViewer below; a co-host's is always the host's own screen)
+const mirrorTarget = () => {
+  if (GUEST) return selfViewer;
+  const v = curViewer();
+  if (v?.self) return v;
+  return v && v.state?.mode === 'screen' && (v.motion?.open || v.model?.open) ? v : null;
+};
 let displayCount = 1;
 let mirrorGoneTimer = null;
 function syncMirror() {
@@ -1012,6 +1034,7 @@ $('mirrorBtn').onclick = () => {
 };
 // another of your screens while it's on: move it there
 $('mirrorDisplay').onchange = () => {
+  if (!GUEST && selfViewer) { setSelfScreen(); renderPlacement(); sendViewersToMembers(); }
   if (!mirrorOpen || !mirrorTarget()) return;
   window.vt.openMirror({ displayId: Number($('mirrorDisplay').value) || 0 });
 };
@@ -1020,7 +1043,8 @@ window.vt.getConfig().then((cfg) => {
   const list = cfg.displays || [];
   $('mirrorDisplay').innerHTML = list.map((d) => `<option value="${d.id}">${d.label.replace(/</g, '&lt;')}</option>`).join('');
   displayCount = list.length;
-  syncMirror();
+  displays = list;
+  refreshViewerSelect();
 });
 function showOutputState(open) {
   outputOpen = open;
@@ -1222,7 +1246,7 @@ function onMemberMessage(mem, d) {
     case 'move': moveInOrder(mem.id, d.dir); return;
     case 'mpos': { // free placement on a full-screen viewer
       if (!settings.freePlace) return;
-      const v = viewers.get(String(d.key));
+      const v = String(d.key) === 'self' ? selfViewer : viewers.get(String(d.key));
       if (!v) return;
       v.mpos = v.mpos || {};
       v.mpos[mem.id] = { x: +d.x, y: +d.y, s: +d.s, tb: !!d.tb };
@@ -1272,6 +1296,8 @@ function sendViewersToMembers(now = false) {
   const go = () => {
     viewersToMembersTimer = null;
     const list = [...viewers.entries()].filter(([, v]) => v.state?.rooms).map(([key, v]) => ({ key, n: v.n, name: viewerLabel(v), state: v.state, pos: v.pos, mpos: v.mpos || {} }));
+    // the host's own screen: where co-hosts' "Show on my screen" places them (always), and what they place on with no viewers
+    if (selfViewer) list.push({ key: 'self', self: true, n: 0, name: "Host's screen", state: selfViewer.state, pos: selfViewer.pos, mpos: selfViewer.mpos || {} });
     for (const m of members.values()) sendToMember(m, { t: 'viewers', list });
   };
   if (now) { clearTimeout(viewersToMembersTimer); go(); }
@@ -1369,6 +1395,7 @@ $('roomModels').onchange = () => {
   const extra = [...members.values()].slice(Math.max(0, maxModels() - 1));
   for (const m of extra) kickMember(m, 'models-full');
   syncObsPeer();
+  refreshViewerSelect(); // your own screen stands in for a viewer only with co-hosts allowed
 };
 function obsNetText() { return members.size ? 'Online, co-hosts in the room' : 'Online, waiting for co-hosts'; }
 /** OBS only: only online (with a room code) while co-hosts are allowed; otherwise nothing leaves this computer. */
@@ -1485,7 +1512,7 @@ async function onHostMessage(d) {
       const newId = d.you && d.you !== myId;
       if (d.you) { myId = d.you; room.skip = new Set([myId]); }
       room.setMembers(d);
-      if (newId && outputOpen) postLocalState(outCh); // my avatar now has its place in the room
+      if (newId && (outputOpen || mirrorOpen)) { if (outputOpen) postLocalState(outCh); if (mirrorOpen) postLocalState(mirCh); } // my avatar now has its place in the room
       else toOutput(d);
       layoutNeighbors(); renderMembersUI(); renderPlacement();
       return;
@@ -1528,7 +1555,15 @@ setInterval(() => {
 function syncGuestViewers() {
   if (!GUEST) return;
   const keep = new Set();
+  const s = guestViewers.find((g) => g.self);
+  if (!s) selfViewer = null;
+  else {
+    if (!selfViewer) selfViewer = { n: 0, self: true, pos: { ...DEFAULT_POS, tb: true }, mpos: {} };
+    selfViewer.state = { ...s.state, name: s.name };
+    if (!selfViewer.dragging) { selfViewer.pos = s.pos || selfViewer.pos; selfViewer.mpos = s.mpos || {}; }
+  }
   for (const g of guestViewers) {
+    if (g.self) continue;
     keep.add(g.key);
     let v = viewers.get(g.key);
     if (!v) { v = { n: g.n, pos: { ...DEFAULT_POS }, guest: true }; viewers.set(g.key, v); }
@@ -1683,8 +1718,10 @@ function onViewerMessage(id, v, d) {
     name: String(d.name || '').slice(0, 24), mode: d.mode, aspect: Number(d.aspect) || 16 / 9,
     zone: d.zone || { x: 0, y: 0, w: 1, h: 1 }, work: d.work || { x: 0, y: 0, w: 1, h: 1 }, sharing: !!d.sharing, have: d.have || null, rooms: !!d.rooms,
   };
-  if (d.pos && !v.dragging) v.pos = { ...DEFAULT_POS, ...d.pos };
+  v.placed = d.placed !== false; // older viewers don't say: keep theirs
+  if (d.pos && !v.dragging && !(v.adopted && !v.placed)) v.pos = { ...DEFAULT_POS, ...d.pos };
   if (!v.pos.tb) { toFullArea(v); sendPos(v, true); }
+  adoptHostPlace(v, !first);
   if (first) {
     v.model.send({ t: 'props', list: publicProps() });
     v.model.send({ t: 'view', ...view });
@@ -1783,6 +1820,7 @@ $('copy').onclick = () => { if (!shownCode) return; window.vt.copyText(shownCode
 
 // ---------------- placement on the viewer's screen ----------------
 let selectedViewer = null;
+let selfViewer = null, displays = [];
 document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('on', x === b));
   const placing = b.dataset.tab === 'place';
@@ -1791,18 +1829,47 @@ document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => {
   renderPlacement();
 }));
 
-function refreshViewerSelect() {
-  const live = [...viewers.entries()].filter(([, v]) => isLive(v));
-  if (!live.some(([id]) => id === selectedViewer)) {
-    const scr = live.find(([, v]) => v.state?.mode === 'screen');
-    selectedViewer = (scr || live[0] || [null])[0];
+// With co-hosts and nobody watching, your own screen stands in for a viewer (to place everyone and
+// "Show on my screen"). It isn't a viewer: not in the list, and only co-hosts hear about it.
+const selfAllowed = () => !GUEST && maxModels() >= 2;
+function setSelfScreen() {
+  if (GUEST) return;
+  if (!selfAllowed()) { selfViewer = null; return; }
+  const d = displays.find((x) => String(x.id) === $('mirrorDisplay').value) || displays[0];
+  const state = { mode: 'screen', rooms: 1, zone: { ...FULL_AREA }, aspect: d?.aspect || 16 / 9, work: d?.work || FULL_AREA, name: 'My screen' };
+  if (!selfViewer) {
+    selfViewer = { n: 0, self: true, mpos: {}, state };
+    selfViewer.pos = settings.selfPos?.tb ? { ...settings.selfPos } : { ...DEFAULT_POS, tb: true, y: taskbarSnapY(selfViewer) ?? 1 };
   }
-  $('viewerSel').innerHTML = live.map(([id, v]) => `<option value="${id}">${viewerLabel(v).replace(/</g, '&lt;')}</option>`).join('')
+  selfViewer.state = state;
+}
+function curViewer() { return selectedViewer === 'self' ? selfViewer : viewers.get(selectedViewer); }
+/** A viewer in Full screen mode who was never placed by anyone starts where you are on your own screen
+ * (the row and the co-hosts' own places), instead of the default corner. Rooms only. */
+function adoptHostPlace(v, sendMembers = true) {
+  if (GUEST || !selfViewer || !v || v.self || v.placed !== false || v.adopted || v.state?.mode !== 'screen') return;
+  v.adopted = true;
+  v.pos = { ...selfViewer.pos };
+  v.mpos = { ...(selfViewer.mpos || {}), ...(v.mpos || {}) };
+  sendPos(v, true);
+  if (sendMembers && v.model?.open && v.state?.rooms) {
+    for (const [mid, p] of Object.entries(v.mpos)) { try { v.model.send(wrapM(mid, { t: 'pos', ...p })); } catch {} }
+  }
+}
+function refreshViewerSelect() {
+  if (!GUEST) { const had = !!selfViewer; setSelfScreen(); if (had !== !!selfViewer) sendViewersToMembers(); }
+  const live = [...viewers.entries()].filter(([, v]) => isLive(v));
+  // in a room your own screen stands in only while no viewer is in Full screen mode (then they replace it)
+  const scr = live.find(([, v]) => v.state?.mode === 'screen');
+  const opts = live.map(([id, v]) => [id, viewerLabel(v)]);
+  if (selfViewer && !scr) opts.unshift(['self', GUEST ? 'Host’s screen' : 'My screen']);
+  if (!opts.some(([id]) => id === selectedViewer)) selectedViewer = (scr || (selfViewer ? ['self'] : live[0]) || [null])[0];
+  $('viewerSel').innerHTML = opts.map(([id, name]) => `<option value="${id}">${name.replace(/</g, '&lt;')}</option>`).join('')
     || '<option value="">No viewers</option>';
   if (selectedViewer) $('viewerSel').value = selectedViewer;
   renderPlacement();
 }
-$('viewerSel').onchange = () => { selectedViewer = $('viewerSel').value; renderPlacement(); };
+$('viewerSel').onchange = () => { selectedViewer = $('viewerSel').value; adoptHostPlace(curViewer()); renderPlacement(); };
 
 const FULL_AREA = { x: 0, y: 0, w: 1, h: 1 };
 // The avatar may go anywhere in the viewer's zone, taskbar included (when they watch something full
@@ -1893,7 +1960,7 @@ function clampPos(p, zp) {
 function renderPlacement() {
   syncMirror();
   if ($('placeView').hidden) return;
-  const v = viewers.get(selectedViewer);
+  const v = curViewer();
   const msg = $('placeMsg');
   const show = (text) => { msg.hidden = false; msg.innerHTML = text; $('screenArea').hidden = true; $('placeBar').hidden = !v; };
   if (!v) return show('Nobody is watching yet. Viewers in <b>Full screen</b> mode show up here.');
@@ -1933,7 +2000,8 @@ function renderPlacement() {
   const vid = $('screenVid');
   if (vid.srcObject !== (v.stream || null)) vid.srcObject = v.stream || null;
   $('noVideo').hidden = !!v.stream;
-  $('noVideo').innerHTML = v.state.sharing ? 'Connecting to screen preview…'
+  $('noVideo').innerHTML = v.self ? (GUEST ? 'This is an outline of the host’s screen.' : 'This is an outline of your own screen.')
+    : v.state.sharing ? 'Connecting to screen preview…'
     : 'Screen preview is off (they can turn it on from their tray icon).<br>This is an outline of their monitor.';
 
   const zp = zoneRectPx();
@@ -1989,6 +2057,7 @@ function sendPos(v, force = false) {
   if (!force && now - lastPosSend < 50) { posSendTimer = setTimeout(() => sendPos(v, true), 50); return; }
   lastPosSend = now;
   if (v.model?.open) v.model.send({ t: 'pos', x: v.pos.x, y: v.pos.y, s: v.pos.s, tb: !!v.pos.tb });
+  if (v.self) { settings.selfPos = { ...v.pos }; saveSettings(); }
   sendViewersToMembers(); // co-hosts see where you put the row on their placement screen
 }
 
@@ -2009,7 +2078,7 @@ function updatePos(v, patch) {
 // drag to move, drag the dot to resize
 let drag = null;
 $('avBox').addEventListener('pointerdown', (e) => {
-  const v = viewers.get(selectedViewer);
+  const v = curViewer();
   if (!v || e.button !== 0) return;
   e.preventDefault();
   $('avBox').setPointerCapture(e.pointerId);
@@ -2036,7 +2105,7 @@ const endDrag = () => { if (!drag) return; drag.v.dragging = false; if (!GUEST) 
 $('avBox').addEventListener('pointerup', endDrag);
 $('avBox').addEventListener('pointercancel', endDrag);
 $('screenArea').addEventListener('wheel', (e) => {
-  const v = viewers.get(selectedViewer);
+  const v = curViewer();
   if (!v) return;
   e.preventDefault();
   updatePos(v, { s: roomPos(v, myId || 'h').s * (e.deltaY < 0 ? 1.06 : 1 / 1.06) });
@@ -2044,7 +2113,7 @@ $('screenArea').addEventListener('wheel', (e) => {
 $('placeAdd').onclick = () => $('placeFile').click();
 $('placeFile').onchange = async () => { for (const f of $('placeFile').files) await addPropFile(f, { onScreen: true }); $('placeFile').value = ''; };
 resetButtons($('resetPosBtns'), (what) => {
-  const v = viewers.get(selectedViewer);
+  const v = curViewer();
   if (!v) return;
   if (what === 'size') updatePos(v, { s: DEFAULT_POS.s }); // feet stay where they are
   else if (what === 'pos') updatePos(v, { x: DEFAULT_POS.x, tb: true, y: taskbarSnapY(v) ?? 1 });
@@ -2572,7 +2641,7 @@ function buildFrame(result, nowMs) {
   if (settings.blinkMax < 1) for (const i of BLINK_IDX) b[i] = Math.min(settings.blinkMax, b[i]);
 
   const frame = {
-    t: 'm', f: true, x: activeExpr, ae: settings.autoExpr, ax: ax && [ax[0], +ax[1].toFixed(3)],
+    t: 'm', f: true, x: activeExpr, ae: settings.autoExpr, ax: ax && [ax[0], +ax[1].toFixed(3)], as: settings.autoSubtle ? 1 : 0,
     q: q.toArray().map((v) => +v.toFixed(4)),
     p: p.toArray().map((v) => +v.toFixed(4)),
     b: b.map((v) => +Math.max(0, v).toFixed(3)),

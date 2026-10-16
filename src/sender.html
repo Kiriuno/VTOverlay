@@ -34,6 +34,7 @@
   #code { font-size: 34px; font-weight: 700; letter-spacing: .18em; font-family: Consolas, ui-monospace, monospace; color: var(--accent); }
   .codeRow { display: flex; align-items: center; justify-content: space-between; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #autoSubtleRow { padding-left: 14px; font-size: 13px; }
   label.toggle { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; cursor: pointer; }
   label.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
   .slider { display: grid; grid-template-columns: 1fr 120px; align-items: center; padding: 4px 0; }
@@ -107,7 +108,7 @@
   body.obsOnly #newCode, body.obsOnly.offline .codeRow, body.obsOnly.offline details[data-sec="viewers"] { display: none !important; }
   body.guest #newCode, body.guest #maxViewersRow, body.guest #roomModelsRow, body.guest #freeRow,
   body.guest #frBtn, body.guest #viewTools .sep, body.guest details[data-sec="view"], body.guest #lightSec,
-  body.guest #mirrorBtn, body.guest #mirrorDisplay, body.guest #viewers .vrow button, body.guest #placeAdd { display: none !important; }
+  body.guest #viewers .vrow button, body.guest #placeAdd { display: none !important; }
   #guestNote { display: none; }
   body.guest #guestNote { display: block; }
   #viewTools { position: absolute; top: 14px; right: 14px; left: 290px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; z-index: 3; pointer-events: none; }
@@ -271,6 +272,7 @@
       <div class="row" style="margin-top:8px"><button id="calib">Calibrate (look straight, relax)</button></div>
       <label class="toggle">Hide webcam preview <input type="checkbox" id="hideCam"></label>
       <label class="toggle">Auto expressions from your face <input type="checkbox" id="autoExpr"></label>
+      <label class="toggle" id="autoSubtleRow" title="Softer auto expressions that never reach full strength (extras like tears that only show at full won't appear)">Subtle auto expressions <input type="checkbox" id="autoSubtle"></label>
       <label class="toggle" title="Your mic opens the mouth while you talk, on top of face tracking">Move mouth with my voice <input type="checkbox" id="voiceMouth"></label>
       <div id="voiceRow" hidden>
         <select id="micSel"></select>

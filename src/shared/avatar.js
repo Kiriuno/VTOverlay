@@ -297,6 +297,7 @@ export class AvatarStage {
     this.target.hold = !!frame.h; // broadcaster out of view: their last pose, held
     this.target.ae = frame.ae !== false;
     this.target.ax = frame.ax; // [auto expression, strength] | null; undefined from older broadcasters
+    this.target.as = !!frame.as; // "subtle auto expressions": softer, never full strength
     this.target.arms = frame.a ?? null;
     this.lastFrameAt = performance.now();
   }
@@ -401,12 +402,16 @@ export class AvatarStage {
       // made before its per-expression mouth / blink tuning, so everyone shows the same one.
       let ax = tgt.ax;
       if (ax === undefined) { const a = autoExpression(cur.b, this.style.ag); this.autoScores = a.scores; ax = a.top; }
-      const auto = live && tgt.ae && ax ? { [ax[0]]: ax[1], relaxed: 0 } : {};
-      // perfect-sync models already show smiles etc. through their blendshapes, so keep auto subtle there
-      const autoGain = this.perfectSync ? 0.35 : 0.75;
+      // A full-strength face reaches the expression's full value (1): some models only show their extras
+      // (tears, blush…) right at the end. Perfect-sync models already show smiles etc. through their
+      // blendshapes, so there it builds up more slowly (squared) but still gets all the way.
+      // "Subtle" (the broadcaster's choice) keeps them softer: 75% at most (35% on perfect-sync models).
+      const s = ax ? clamp01(+ax[1] || 0) : 0;
+      const w = tgt.as ? s * (this.perfectSync ? 0.35 : 0.75) : this.perfectSync ? s * s : s;
+      const auto = live && tgt.ae && ax ? { [ax[0]]: w, relaxed: 0 } : {};
       // hotkey expressions fade in/out and override the auto ones
       for (const name of this.expressions) {
-        const want = live && tgt.x === name ? 1 : (tgt.x ? 0 : (auto[name] ?? 0) * autoGain);
+        const want = live && tgt.x === name ? 1 : (tgt.x ? 0 : (auto[name] ?? 0));
         cur.xw[name] = (cur.xw[name] ?? 0) + (want - (cur.xw[name] ?? 0)) * (1 - Math.exp(-dt * 10));
         em.setValue(name, cur.xw[name]);
       }

@@ -769,7 +769,7 @@ function sendViewerState() {
   model.send({
     t: 'viewer', name: viewerName, mode: MODE,
     aspect: +(innerWidth / innerHeight).toFixed(4),
-    zone, work, pos, sharing, have: stage.modelId || cachedId, rooms: 1, // rooms: understands multi-avatar rooms
+    zone, work, pos, placed: !!store.get('vt-placed', false), sharing, have: stage.modelId || cachedId, rooms: 1, // rooms: understands multi-avatar rooms
   });
 }
 
@@ -857,6 +857,7 @@ async function onModelData(d) {
     case 'pos':
       if (MIRROR && d.zone && typeof d.zone === 'object') zone = { ...FULL_ZONE, ...d.zone }; // the mirrored viewer's area
       if (MODE === 'screen') { applyPos({ x: +d.x, y: +d.y, s: +d.s, tb: !!d.tb }); layoutBox(); }
+      if (!MIRROR) store.set('vt-placed', true); // a broadcaster has placed me: not a fresh screen anymore
       return;
     case 'model-use': {
       if (stage.modelId === d.id) return;
